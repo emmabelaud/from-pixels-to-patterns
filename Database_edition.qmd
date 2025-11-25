@@ -1,0 +1,385 @@
+---
+title: "From pixels to patterns: high-throughput in-situ imaging unveils soil fauna dynamics over a year in agroforestry systems"
+format: html
+editor: visual
+---
+
+# Data preparation
+
+```{r}
+#Package
+library(tidyverse)
+library(lubridate)
+library(ade4)
+
+
+```
+
+## Fauna data
+
+```{r}
+df_raw <- read.csv("~/2. THÈSE/3. DIAMS/fauna_data.csv", sep = ",", na.strings = c("", "NA"))
+
+# Data cleaning
+df <- df_raw %>%
+  filter(!is.na(Predicted.class))%>%
+  filter(!Predicted.class %in% c("under_threshold", "nodule", "SOM", "root_myccorhized", "fungi","unknown", "multi_taxa"))%>%
+  mutate(
+    positionnement = substr(scanner, 4, 4),  # A, B, ou C
+    profondeur = substr(scanner, 5, 6),      # 20 ou 50
+    orientation = substr(scanner, 8, 8)     # O ou E
+  )%>%
+  mutate(date = ymd_hms(date), 
+         date = if_else(minute(date) == 1,
+                        date - minutes(1),date), 
+         hour = hour(date),minute = minute(date)) %>%
+  filter(date> "2024-03-01 00:00:00")%>%
+  filter(minute == 0, hour %in% c(0, 6, 12, 18))
+
+taxon_list <- unique(df$Predicted.class)
+scanner_list <- unique(df$scanner)
+
+
+```
+
+Selection of the most observed taxa (\> 3000 occurrences)
+
+```{r}
+taxa_recode <- df %>% mutate(taxa_levelup = case_when( Predicted.class %in% c("pseudosinella", "poduromorpha") ~ "collembola",Predicted.class %in% c("trombidiformes", "mesostigmata") ~ "acari", TRUE ~ Predicted.class))
+
+relevant_taxa <- df %>% 
+  group_by(Predicted.class) %>% 
+  summarise(total_occurrences = n(), .groups = "drop") %>% 
+  filter(total_occurrences >= 3000) %>% 
+  select(Predicted.class) 
+
+df_filtered <- df %>% 
+  filter(Predicted.class %in% relevant_taxa$Predicted.class)
+
+cat(nrow(relevant_taxa), "selected taxa :", relevant_taxa$Predicted.class)
+```
+
+Completion of occurrence data with 0 for non-observations of invertebrates in images and NA for missing images.
+
+```{r}
+seq_time <- seq(min(df$date), max(df$date), by = "6 hours")
+#Création grille complète des dates 
+grille_complete <- expand_grid(
+  date = seq_time,
+  scanner = scanner_list)
+#Passage du df en matrice d'abondances
+df_complet <- df_filtered %>%
+  group_by(Predicted.class, date, scanner, profondeur, positionnement, orientation)%>%
+  reframe(count= n())%>%
+  mutate(presence = 1) %>% 
+  pivot_wider(names_from = Predicted.class, values_from = count, values_fill = 0)
+#Complétion de la matrice
+df_complet <- grille_complete %>%
+  mutate(positionnement = as.factor(substr(scanner, 4, 4)),  # A, B, ou C
+    profondeur = as.factor(substr(scanner, 5, 6)),      # 20 ou 50
+    orientation = as.factor(substr(scanner, 8, 8))     # O ou E
+  )%>%
+  left_join(df_complet, by = c("date", "scanner", "profondeur", "positionnement", "orientation"))%>%   
+  mutate(presence = replace_na(presence, 0))
+
+# Creation of a total abundance column, but only for the most frequently observed taxa
+df_complet <- df_complet %>%
+  rowwise() %>%
+  mutate(all_taxa = sum(c_across(all_of(relevant_taxa$Predicted.class)), na.rm = FALSE)) %>%
+  ungroup()
+```
+
+```{r}
+df_complet %>%
+  mutate(
+    annee = as.factor(year(date)),
+    mois = as.factor(lubridate::month(date, label = TRUE, abbr = TRUE))) %>%
+  group_by(scanner, annee, mois, presence) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(scanner, annee, mois) %>%
+  mutate(prop = n / sum(n))%>%
+  ggplot(aes(x = mois, y = prop, fill = as.factor(presence))) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(scanner ~ annee) +
+  scale_fill_manual(values = c("0" = "grey80", "1" = "#F4631E"),
+                    labels = c("0" = "Données manquantes", "1" = "Données présentes")) +
+  labs(title = "Proportion de données manquantes par mois et par scanner",x = "Mois",y = "Proportion",fill = "") +theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "bottom")+theme(plot.title = element_text(size = 16))
+```
+
+Selection of the aggregate variable total abundance of invertebrates per image.
+
+### Land-use
+
+Two types of land use are compared: under tree cover and herbaceous species, and under cultivated cover. In order to integrate this categorical variable into the structural equation model, it is recoded as a binary variable:
+
+-   0 corresponds to surveys carried out under tree cover and herbaceous species, generally associated with position "A"
+
+-   1 corresponds to surveys carried out under cultivated cover, generally associated with position "C"
+
+The intermediate position "B" is removed.
+
+```{r}
+data_sem <- df_complet %>%
+  filter(positionnement != "B") %>%
+  mutate(profondeur = as.factor(profondeur), 
+         scanner=as.factor(scanner),
+         annee = as.factor(year(date)),
+         mois = floor_date(date, unit = "month"),
+         semaine = floor_date(date, unit = "week")) 
+```
+
+### Missing data
+
+We select the dates (time + day of capture) for which we have images from the eight scanners studied.
+
+```{r}
+#filtre pour homogénéité spatiale stricte 
+data_sem %>%group_by(date) %>% reframe(images_count = sum(presence))%>% 
+  summarise(prop = mean(images_count == 8))
+#filtre autorisant 1 donnée manquante par date
+data_sem %>%group_by(date) %>% reframe(images_count = sum(presence))%>% 
+  summarise(prop = mean(images_count > 5))
+
+data_sem <- data_sem %>%
+  group_by(date) %>%
+  mutate(images_count = sum(presence),
+         dates_to_keep = as.factor(as.integer(images_count > 6)),
+         presence = as.factor(presence)) %>%
+  ungroup() 
+
+data_sem %>%
+  mutate( annee = as.factor(year(date)),
+    mois = as.factor(lubridate::month(date, label = TRUE, abbr = TRUE))) %>%
+  group_by(scanner, annee, mois, dates_to_keep) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(scanner, annee, mois) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = mois, y = prop, fill = dates_to_keep)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(~ annee) +
+  scale_fill_manual(values = c("0" = "grey80", "1" = "#00A86B"),
+                    labels = c("0" = "Données absentes", "1" = "Données conservées")) +
+  labs(title = "Proportion de données conservées par mois et par scanner",x = "Mois",y = "Proportion",fill = "") +theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "bottom")+theme(plot.title = element_text(size = 16))
+```
+
+## Environmental data
+
+```{r}
+soil_probe_data <- read.csv("~/2. THÈSE/3. DIAMS/Données sondes/Diams_AF1W_soil.csv") %>% 
+  mutate(date = as.POSIXct(date, format = "%Y-%m-%d %H:%M:%S"), 
+         profondeur=as.factor(profondeur), 
+         positionnement=as.factor(positionnement))
+
+air_probe_data <- read.csv("~/2. THÈSE/3. DIAMS/Données sondes/Diams_AF1W_air.csv")  %>% 
+  mutate(date = as.POSIXct(date, format = "%Y-%m-%d %H:%M:%S"), 
+         positionnement=as.factor(positionnement))
+```
+
+### Micro-climat
+
+Selection of humidity and temperature data
+
+```{r}
+data_sem  <- data_sem %>% 
+  left_join(soil_probe_data %>% rename(hum=hum_soil, temp=temp_soil) %>% select(profondeur, positionnement,date, hum, temp),by = c("date" , "profondeur", "positionnement")) %>%
+  filter(dates_to_keep == 1)
+```
+
+**But here is the procedure for calculating other microclimatic indices**
+
+Calculation of microclimatic indices according to Grooss et al., in prep: median (represents the average without sensitivity to extremes), amplitude (variability over the period), rate of change (variability in the moment), 97.5% maxima (hot or wet extremes) and 2.5% minima (cold or dry extremes).
+
+```{r}
+# Function for calculating climate indices
+microclimate_index_compute <- function(vec) {
+  if (sum(!is.na(vec)) < 2) {
+    return(setNames(rep(NA, 5), c("median", "amplitude", "change_ratio", "max", "min")))
+  }
+  med <- median(vec, na.rm = TRUE)
+  amp <- unname(quantile(vec, 0.95, na.rm = TRUE) - quantile(vec, 0.05, na.rm = TRUE))
+  change <- median(diff(round(vec, 6)), na.rm = TRUE)
+  max_val <- unname(quantile(vec, 0.975, na.rm = TRUE))
+  min_val <- unname(quantile(vec, 0.025, na.rm = TRUE))
+
+  result <- list(
+    median = med,
+    amplitude = amp,
+    change_ratio = change,
+    max = max_val,
+    min = min_val
+  )
+  return(list(result))
+}
+```
+
+```{r}
+time_scale = c("annee", "mois","heure") # à l'échelle de la journée
+soil_probe_data %>%
+  mutate(annee = as.factor(year(date)),mois = as.factor(month(date)),semaine = as.factor(isoweek(date)),jour = date(date),heure = as.factor(hour(date)),minutes = as.factor(minute(date)))%>%
+  group_by(across(all_of(c("profondeur", "positionnement", time_scale)))) %>% 
+  reframe(across(all_of(c("temp_soil", "hum_soil")), ~microclimate_index_compute(.), .names = "{.col}")) %>%
+  unnest_wider(temp_soil, names_sep = "_") %>%
+  unnest_wider(hum_soil, names_sep = "_") %>% 
+  mutate(across(where(is.numeric), ~ scale(.)[, 1]))%>%
+  pivot_longer(cols = where(is.numeric),names_to = "variable",values_to = "value")%>%
+  group_by(positionnement, variable, .groups = "drop")%>%
+  reframe(mean_value=mean(value))%>%
+  ggplot(aes(variable, mean_value, group=positionnement, color = positionnement))+
+  geom_point(size=3)+
+  geom_line(linewidth=2)+
+   ylim(-1, 1)+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  scale_color_manual(values = positionnement_palette)+
+  labs(y = "valeurs moyennes centrées et réduites", title = paste0("comparaison des modalités de positionnement suivant différents \nindices microclimatiques calculés par ", paste(time_scale,collapse = " ")))+
+  theme_minimal()
+```
+
+```{r}
+microclimate_soil_index <- soil_probe_data %>% 
+  mutate(annee = as.factor(year(date)),
+         mois = as.factor(month(date)),
+         semaine = as.factor(isoweek(date)),
+         jour = date(date),
+         heure = as.factor(hour(date)),
+         minutes = as.factor(minute(date))) %>%
+  group_by(across(all_of(c("positionnement", "profondeur", time_scale)))) %>% 
+  reframe(across(all_of(c("temp_soil", "hum_soil")), ~microclimate_index_compute(.), .names = "{.col}")) %>% 
+  unnest_wider(temp_soil, names_sep = "_") %>% 
+  unnest_wider(hum_soil, names_sep = "_")
+```
+
+✏️️ *Les indices utilisés sont ceux mesurés à l'échelle de la journée. Le graphique présentant les indices mesurés à une autre échelle montrent des résultats différents \> approfondir la question de l'échelle temporelle d’agrégation des données et ses implications écologiques.*
+
+Performing PCA with the 10 microclimatic indices to identify correlation structures between variables and extract a small number of uncorrelated indices that summarise most of the variability of the indices:
+
+```{r}
+acp <- dudi.pca(microclimate_soil_index[,6:15], scannf = F, nf = 2)
+
+co <- as.data.frame(acp$co)
+co$var <- rownames(co)
+eig_percent <- round(100 * acp$eig / sum(acp$eig), 1)
+x_lab <- paste0("Dimension 1 (", eig_percent[1], " %)")
+y_lab <- paste0("Dimension 2 (", eig_percent[2], " %)")
+circle <- data.frame(x = cos(seq(0, 2 * pi, length.out = 100)),
+                     y = sin(seq(0, 2 * pi, length.out = 100)))
+
+# Fusion des modalités avec les scores individuels
+ind_coords <- as.data.frame(cbind(acp$li, microclimate_soil_index[, 1:2]))
+
+# Moyennes par modalité
+profondeur_means <- aggregate(cbind(Axis1 = Axis1, Axis2 = Axis2) ~ profondeur, data = ind_coords, FUN = mean)
+positionnement_means <- aggregate(cbind(Axis1 = Axis1, Axis2 = Axis2) ~ positionnement, data = ind_coords, FUN = mean)
+
+ggplot() +
+  geom_path(data = circle, aes(x = x, y = y), color = "gray70") +
+  geom_segment(data = co, aes(x = 0, y = 0, xend = Comp1, yend = Comp2),
+               arrow = arrow(length = unit(0.2, "cm")), color = "black") +
+  ggrepel::geom_text_repel(data = co, aes(x = Comp1, y = Comp2, label = var),
+                  size = 4, color = "black") +
+  geom_point(data = profondeur_means, aes(x = Axis1, y = Axis2), color = "#d89060", size = 3) +
+  ggrepel::geom_text_repel(data = profondeur_means, aes(x = Axis1, y = Axis2, label = profondeur), color = "#d89060") +
+  geom_point(data = positionnement_means, aes(x = Axis1, y = Axis2), color = "#a8c090", size = 3) +
+  ggrepel::geom_text_repel(data = positionnement_means, aes(x = Axis1, y = Axis2, label = positionnement), color = "#a8c090") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  coord_fixed() +
+  theme_minimal()+
+  labs(x = x_lab, y = y_lab, title = "Cercle des corrélations")
+```
+
+According to PCA, two highly orthogonal variables that we can select are: daily temperature range (temp_soil_amplitude) and daily minimum temperatures (temp_soil_min).
+
+```{r}
+#data_sem  <- data_sem %>% mutate(jour = date(date))%>% left_join(microclimate_soil_index %>% select(profondeur, positionnement,jour, temp_soil_amplitude, temp_soil_min),by = c("jour" , "profondeur", "positionnement"))
+```
+
+## Roots data
+
+```{r}
+dpi <- 1200 
+pixels_per_cm <- dpi / 2.54 
+root_density <- read.csv("~/2. THÈSE/3. DIAMS/root_pixels_count.csv") 
+root_density<- root_density %>%
+  mutate(image_name = sub("\\.png$", "", root_density$file)) %>%  
+  separate(file, into = c("bloc", "position", "orientation","year","month", "day", "hour", "minute", "fileextension1"), 
+           sep = "_|\\.|H|M.| |-", remove = FALSE)%>%
+  mutate(scanner = as.factor(paste(position, orientation, sep = "_")),
+         profondeur = as.factor(substr(scanner, 2, 3)),
+         positionnement = as.factor(substr(scanner, 1, 1)),  
+         minute = if_else(minute == "01", "00", minute))%>%
+  filter(hour %in% c("00", "06", "12", "18")) %>%
+  mutate(date = ymd_hm(paste(year, month, day, hour, minute)))
+
+root_density <- root_density %>%
+  arrange(scanner, date) %>%  
+  group_by(scanner) %>%
+  mutate(lag_days = 9,
+         date_target = date - days(9),
+         date_target_24h = date - days(1)) %>%
+  ungroup() %>%
+  left_join(root_density %>% select(scanner, date, root_pixels_count) %>%
+              rename(date_target = date,
+                     root_pixels_count_lag = root_pixels_count),
+            by = c("scanner", "date_target"), relationship = "many-to-many") %>%
+  left_join(root_density %>% select(scanner, date, root_pixels_count) %>%
+              rename(date_target_24h = date,
+                     root_pixels_count_lag_6h = root_pixels_count),
+            by = c("scanner", "date_target_24h"), relationship = "many-to-many") %>%
+  mutate(root_growth_pixel_count = root_pixels_count - root_pixels_count_lag,
+         root_mature_pixel_count = root_pixels_count - root_growth_pixel_count,
+         root_growth_pixel_count_6h = root_pixels_count - root_pixels_count_lag_6h) %>%
+  mutate(root_cm2_count = root_pixels_count / (pixels_per_cm^2),
+         root_growth_cm2_count = root_growth_pixel_count / (pixels_per_cm^2),
+         root_mature_cm2_count = root_mature_pixel_count / (pixels_per_cm^2),
+         root_growth_cm2_count_24h = (root_growth_pixel_count_6h / (pixels_per_cm^2))/24)%>%
+  mutate(root_growth_cm2_count_24h = case_when(
+    root_growth_cm2_count_24h < 0 ~ 0,
+    TRUE ~ root_growth_cm2_count_24h
+  ))
+
+
+
+data_sem <- data_sem %>%   
+  left_join(root_density %>% select(date, positionnement, profondeur, orientation, root_cm2_count, root_growth_cm2_count, root_mature_cm2_count,root_growth_cm2_count_24h), by = c("date", "positionnement", "profondeur", "orientation"))
+```
+
+## Season variable
+
+```{r}
+annees <- 2023:2025
+season <- c("spring", "summer", "autumn", "winter")
+seasons <- bind_rows(lapply(annees, function(an) {
+  tibble(
+    season = season,
+    date_debut = as.Date(paste0(an, c("-03-21", "-06-21", "-09-21", "-12-21"))),
+    date_fin = as.Date(paste0(c(an, an, an, an + 1), c("-06-20", "-09-20", "-12-20", "-03-20"))))
+}))
+
+data_sem <- data_sem %>%
+  mutate(jour = as.Date(date))%>%
+  left_join(seasons %>% rowwise() %>% 
+  mutate(jour = list(seq(date_debut, date_fin, by = "day"))) %>% 
+  unnest(cols = c(jour)) %>% 
+  dplyr::select(jour, season), by = "jour")
+```
+
+## Data standardisation
+
+```{r}
+#data_sem <- data_sem %>% mutate(all_taxa = log(all_taxa+1)+1, temp_soil_amplitude = log(temp_soil_amplitude+1),temp_soil_min = log(temp_soil_min),root = log(root+1)+1) %>% drop_na()
+#data_sem <- data_sem %>% mutate(across(c(all_taxa, temp_soil_amplitude, temp_soil_min, root), ~ as.numeric(scale(.))))
+
+data_sem <- data_sem %>% 
+  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+
+```
+
+## CSV generation
+
+```{r}
+data_sem$date <- format(data_sem$date, "%Y-%m-%d %H:%M:%S")
+write.csv(data_sem, "~/2. THÈSE/6. Analyse/1.AF patron spatio-temp/1. Analyse/SEM_database.csv", row.names = FALSE, quote = TRUE)
+
+```
