@@ -14,7 +14,7 @@ execute:
 
 ## Packages and data
 
-```{r}
+```{r} test}
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
