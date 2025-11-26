@@ -1,0 +1,89 @@
+---
+title: "EDM analysis"
+format: html
+editor: visual
+---
+
+Documentation about EDM and rEDM package :
+
+-   <https://sugiharalab.github.io/EDM_Documentation/>
+
+-   <https://github.com/SugiharaLab/rEDM/>
+
+### Package and data
+
+```{r}
+vignette("rEDM-tutorial")
+
+if (!dir.exists("../output")) {
+  dir.create("../output")
+}
+
+invisible(lapply(c("tidyverse", "lubridate", "rEDM", "purrr"),require,character.only = TRUE))
+
+raw_data_edm <- read.csv("../data/SEM_database.csv", sep = ",", na.strings = c("", "NA")) %>% mutate(depth = as.factor(depth), presence = as.factor(presence), dates_to_keep = as.factor(dates_to_keep))
+raw_data_edm$date <- ymd_hms(raw_data_edm$date, tz = "UTC")
+
+data_edm <- raw_data_edm %>% 
+  filter(scanner == "AF_A20_E")%>% ## pour les tests, selection arbitraire d'un scan
+  select(date, where(is.numeric))
+```
+
+### Optimal embedding dimension ?
+
+Evaluation of the simplex prediction accuracy over a range of embedding dimensions. The embedding dimension E with the highest predictive accuracy is selected for system analysis.
+
+```{r}
+rho_E <- EmbedDimension(dataFrame = data_edm , lib = "1 2399", pred = "1 2399", columns = "all_taxa", target = "all_taxa")
+
+E <- rho_E$E[which.max(rho_E$rho)]
+```
+
+### Prediction decay ?
+
+Deterministic chaos, or the butterfly effect, reflects our relative ability to predict the behavior of natural systems in the short term, but also the dilution of this predictive ability over time, making long-term forecasting difficult. The `PredictInterval()` function examines how predictive ability changes as the number of time steps into the future for which predictions are made increases.
+
+A decline in forecast skill (rho → 0) as the forecast interval Tp increases indicates that the system may be chaotic.
+
+```{r}
+rho_Tp <- PredictInterval(dataFrame = data_edm , lib = "1 2399", pred = "1 2399", columns = "all_taxa", target = "all_taxa", E = E) 
+```
+
+### Identifying non linearity ?
+
+Even if they are purely stochastic, time series can exhibit predictability—similar to that of autocorrelated red noise, but distinguishable from nonlinear deterministic behavior with S-maps.
+
+S-maps fits local linear maps to describe the system dynamics, with a nonlinear localisation parameter 𝜃 that determines the degree to which points are weighted when fitting the local linear map. Thus, if the time series present an autoregressive red noise, the linear model with 𝜃 = 0 should produce better forecasts. In contrast, if forecast skill increases for 𝜃 \> 0, then the results are suggestive of nonlinear dynamics wherein better forecasts are achieved when the local linear map can change depending on the location in state-space: it is a better description of state-dependent behavior.
+
+The `PredictNonlinear()` function provides an evaluation of S-map forecast skill as a function of the localisation parameter theta. If unspecified, `theta` values will range from 0.01 to 9.
+
+```{r}
+rho_theta = PredictNonlinear(dataFrame = data_edm , lib = "1 2399", pred = "1 2399", columns = "all_taxa", target = "all_taxa", E = E) 
+```
+
+### Generalized Takens Theorem
+
+Multivariate can often be a better description than univariate reconstructions, indicating that, in addition to creating an attractor from lags of one time series, it can be advantageous to combine different time series to create the phase-space embedding.
+
+In practice in `Simplex()` and `Smap()` functions, multivariate reconstruction is defined by specifying which columns to use as coordinates in `colums` argument and which column is to be forecast in `target` argument.
+
+```{r}
+multi_simplex <- Simplex(dataFrame = data_edm, lib = "1 2399", pred = "1 2399", E = 6, columns = "hum temp root all_taxa", target = "all_taxa")
+
+err = ComputeError(multi_simplex$Observations, multi_simplex$Predictions) 
+plot(multi_simplex$Observations, multi_simplex$Predictions, pch = 19, cex = 0.5, xlab = "Observations", ylab = "Predictions") 
+abline(a = 0, b = 1, lty = 2, col = "blue") 
+text(3, 0, paste(capture.output(cbind(err)), collapse = "\n"))
+```
+
+### Multiview embedding
+
+With multivariate time series, there can often be many different valid attractor reconstructions. The combination of these different models can result in improved forecast.
+
+`Multiview()` function constructs all possible embeddings of dimension E with lag up to E-1. These embeddings are ranked by forecast skill (rho) over the lib portion of the data.
+
+```{r}
+multiview <- Multiview(dataFrame = data_edm, lib = "1 2399", pred = "1 2399", E = 6, columns = "hum temp root all_taxa", target = "all_taxa")
+
+Mview$View[which(Mview$View$rho > 0.91), ]
+```
