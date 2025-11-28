@@ -18,22 +18,16 @@ execute:
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "nlme", "patchwork", "e1071", "dsem", "kableExtra", "phylopath"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath"),require,character.only = TRUE))
 
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
 
 # Données faune
-data_sem_raw <- read.csv("../data/SEM_database.csv", sep = ",", na.strings = c("", "NA"))
-data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
-
-data_sem <- data_sem_raw %>% 
-  dplyr::select(date, position, depth, orientation, season, hum, temp, all_taxa, root)
-
-data_sem <- data_sem %>% 
-  drop_na()%>%
+data_sem_raw <- read.csv("../data/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
   rename("root" = root,
          "fauna" = all_taxa)
+data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
 ```
 
 ## H1/ Effect of land use on soil conditions
@@ -52,7 +46,7 @@ variable_labels  <- c(hum = "Soil \nhumidity",
 position_label <- c(A = "Unmanaged \nsystem",
         C = "Managed \nsystem")
 
-stats <- data_sem %>%
+stats <- data_sem_raw %>%
   dplyr::select(date, position, depth, orientation, fauna, root, hum, temp) %>%
   pivot_longer(cols = c('fauna', 'root','hum', 'temp'), names_to = "variable_name") %>%
   mutate(variable_name = factor(variable_name,
@@ -66,7 +60,7 @@ stats <- data_sem %>%
   )
 
 tiff("../output/variable_distribution.tiff", width = 3000, height = 1500, res = 300)
-data_sem %>%
+data_sem_raw %>%
   dplyr::select(date, position, depth, orientation, fauna, root, hum, temp) %>%
   pivot_longer(cols = c('hum', 'temp', 'root','fauna'), names_to = "variable_name") %>%
   mutate(variable_name = factor(variable_name,
@@ -104,7 +98,7 @@ variable_labels  <- c(hum = "Soil humidity",
         fauna = "Invertebrate abundance")
 season_levels <- c("winter", "spring", "summer", "autumn")
 
-stats <- data_sem %>%
+stats <- data_sem_raw %>%
   dplyr::select(date, season, depth, orientation, fauna, root, hum, temp) %>%
   pivot_longer(cols = c('fauna', 'root','hum', 'temp'), names_to = "variable_name") %>%
   mutate(variable_name = factor(variable_name,
@@ -119,7 +113,7 @@ stats <- data_sem %>%
   )
 
 tiff("../output/variable_distribution_across_season.tiff", width = 2800, height = 1600, res = 300)
-data_sem %>%
+data_sem_raw %>%
   dplyr::select(date, season, depth, orientation, fauna, root, hum, temp) %>%
   pivot_longer(cols = c('hum', 'temp', 'root','fauna'), names_to = "variable_name") %>%
   mutate(variable_name = factor(variable_name,
@@ -152,92 +146,128 @@ dev.off()
 
 ## H2/ Effects of land use on the relationships between biotic and abiotic drivers
 
+#### Parameters definition
+
 ```{r}
+time_step_days <- 15
+window_size <- time_step_days * 4
+missing_data_rate <- 0.3
+```
+
+#### Calculation of indices
+
+```{r}
+# function to compute index
+index_compute <- function(vec) {
+  n_total <- length(vec)
+  n_missing <- sum(is.na(vec))
+  
+  if (n_missing / n_total > missing_data_rate) return(rep(NA_real_, 5))
+  
+  c(
+    median = median(vec, na.rm = TRUE),
+    amplitude = unname(quantile(vec, 0.95, na.rm = TRUE) - quantile(vec, 0.05, na.rm = TRUE)),
+    change_ratio = median(diff(round(vec, 6)), na.rm = TRUE),
+    max = unname(quantile(vec, 0.975, na.rm = TRUE)),
+    min = unname(quantile(vec, 0.025, na.rm = TRUE))
+  )
+}
+
+# function application
+data_sem_indices <- data_sem_raw %>%
+  arrange(position, orientation, depth, date) %>%
+  group_by(position, orientation, depth) %>%
+  mutate(
+    temp_index  = slide(temp,  index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
+    hum_index   = slide(hum,   index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
+    fauna_index = slide(fauna, index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
+    root_index  = slide(root,  index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE)
+  ) %>%
+  unnest(cols = c(temp_index, hum_index, fauna_index, root_index),
+    names_sep = "_")
+
+# index selection
+# based on a dimensionality reduction procedure
+microclim_data <- data_sem_indices %>%
+  select(starts_with(c("temp", "hum")))%>%
+  drop_na() 
+
+acp_microclimate <- dudi.pca(microclim_data, scannf = FALSE, nf = 2)
+s.corcircle(acp_microclimate$co)
+var_coord <- acp_microclimate$co[, 1:2]
+var_names <- rownames(var_coord)
+
+microclimate_index <- combn(var_names, 2, function(p) {
+  abs(cor(as.numeric(var_coord[p[1], ]), as.numeric(var_coord[p[2], ])))
+}) %>%
+  { pair_matrix <- combn(var_names, 2); pair_matrix[, which.min(.)] }
+
+cat("Microclimate index selected :", microclimate_index[1], "and", microclimate_index[2])
+```
+
+#### SEM model
+
+```{r}
+# database cleaning
+data_sem <- data_sem_indices %>%
+  select(date, position, depth, orientation, fauna_index_median, root_index_median, microclimate_index[1], microclimate_index[2])%>%
+  rename("root" = root_index_median, 
+         "fauna" = fauna_index_median,
+         "microclimate_index_1" = microclimate_index[1],
+         "microclimate_index_2" = microclimate_index[2])%>%
+  drop_na()
+
 #Function for modelling SEM
 sem_fit <- function(data) {
   psem(
-    lme(root ~ temp + hum, 
+    lme(root ~ microclimate_index_1 + microclimate_index_2, 
         data = data, 
         random = ~1 | orientation/depth, 
         correlation = corAR1(form = ~1 | orientation/depth)),
     
-    lme(fauna ~ temp + hum + root, 
+    lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root, 
         data = data, 
         random = ~1 | orientation/depth, 
         correlation = corAR1(form = ~1 | orientation/depth)),
     
-    temp %~~% hum
+    microclimate_index_1 %~~% microclimate_index_2
   )
 }
 ```
 
-### SEM selon position
+#### Verification of model fit
+
+⚠️ **to do** ⚠️️
+
+#### SEM application
+
+depending on the position and time step, but the problem is that there is not enough data
 
 ```{r}
 positions <- c("A", "C")
-models_global <- list()
-n_global <- list()
+dates <- unique(data_sem$date)
+models_date <- list()
 
 for (pos in positions) {
-  data_pos <- data_sem %>%
-    mutate(depth = as.factor(depth)) %>%
-    filter(position == pos)
-  
-  n_global[[pos]] <- nrow(data_pos)
-  cat("\nposition", pos, ":", n_global[[pos]], "observations used\n")
-  
-  models_global[[paste0("model_", pos)]] <- sem_fit(data_pos)
-}
-
-summaries_global <- lapply(models_global, summary)
-
-cat("\n\n===== SUMMARIES OF GLOBAL MODELS =====\n")
-for (name in names(summaries_global)) {
-  cat("\n\n----------------------------\n",
-      toupper(name),
-      "\n----------------------------\n")
-  cat("Number of data points used :", 
-      n_global[[sub("model_", "", name)]], "\n")
-  print(summaries_global[[name]])
-}
-```
-
-### **SEM position x season**
-
-```{r}
-seasons <- c("winter", "spring", "summer", "autumn")
-models_season <- list()
-n_season <- list()
-
-for (pos in positions) {
-  for (s in seasons) {
+  for (d in dates) {
+    
     data_subset <- data_sem %>%
       mutate(depth = as.factor(depth)) %>%
-      filter(position == pos, season == s)
-    
-    n_season[[paste0(pos, "_", s)]] <- nrow(data_subset)
+      filter(position == pos, date == d)
     
     if (nrow(data_subset) > 0) {
-      cat("\nposition", pos, "-", s, ":", nrow(data_subset), "observations used\n")
-      models_season[[paste0("model_", pos, "_", s)]] <- sem_fit(data_subset)
+      cat("\nposition", pos, "-", d, ":", nrow(data_subset), "observations used\n")
+      models_date[[paste0("model_", pos, "_", d)]] <- sem_fit(data_subset)
     }
   }
 }
 
-summaries_season <- lapply(models_season, summary)
 
-cat("\n\n===== SUMMARIES OF MODELS BY SEASON =====\n")
-for (name in names(summaries_season)) {
-  cat("\n\n----------------------------\n",
-      toupper(name),
-      "\n----------------------------\n")
-  key <- sub("model_", "", name)
-  cat("Number of data points used :", n_season[[key]], "\n")
-  print(summaries_season[[name]])
-}
+summaries <- lapply(models_date, summary)
+
 ```
 
-### DSEM ?
+### DYNAMICAL SEM
 
 ```{r}
 ## model 
@@ -400,6 +430,6 @@ p3 <- plots_A$p2+ ggtitle("p values for unmanaged system")
 p4 <- plots_C$p2+ ggtitle("p values for managed system")
 
 tiff("../output/dsem_results.tif", width = 3000, height = 3000, res = 300)
-(p1+p2+p3+p4)+plot_annotation(title= "dsem n= 846")
+(p1+p2+p3+p4)+plot_annotation(title= "dsem all taxa n= 846")
 dev.off()
 ```
