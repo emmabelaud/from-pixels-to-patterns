@@ -15,10 +15,11 @@ execute:
 ## Packages and data
 
 ```{r}
+Sys.setlocale("LC_TIME", "C") 
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme"),require,character.only = TRUE))
 
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
@@ -33,10 +34,6 @@ data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
 ## H1/ Effect of land use on soil conditions
 
 ### Conditions according to land use
-
-Skewness (asymétrie) : \> 0 : queue droite plus longue → valeurs extrêmes positives plus fréquentes, \< 0 : queue gauche plus longue → valeurs extrêmes négatives plus fréquentes, ≈ 0 : distribution symétrique (proche de la normale).
-
-Kurtosis (aplatissement) : \> 0 : distribution plus "pointue", avec plus de valeurs extrêmes (leptokurtique)., \< 0 : distribution plus "plate", avec moins de valeurs extrêmes (platykurtique), ≈ 0 : distribution proche de la normale (mésokurtique).
 
 ```{r}
 variable_labels  <- c(hum = "Soil \nhumidity",
@@ -148,8 +145,12 @@ dev.off()
 
 #### Parameters definition
 
+Definition of the time integration step parameters and maximum allowable missing data rate for calculating the indices.
+
+📌 Once the analytical procedure has been established, the influence of these parameters on the results will need to be explored in order to adapt them as necessary.
+
 ```{r}
-time_step_days <- 15
+time_step_days <- 7
 window_size <- time_step_days * 4
 missing_data_rate <- 0.3
 ```
@@ -157,14 +158,23 @@ missing_data_rate <- 0.3
 #### Calculation of indices
 
 ```{r}
-# function to compute index
-index_compute <- function(vec) {
+# function to compute indices
+vars_to_index <- c("temp", "hum", "fauna", "root")
+index_compute_tibble <- function(vec) {
   n_total <- length(vec)
   n_missing <- sum(is.na(vec))
   
-  if (n_missing / n_total > missing_data_rate) return(rep(NA_real_, 5))
+  if (n_missing / n_total > missing_data_rate) {
+    return(tibble(
+      median = NA_real_,
+      amplitude = NA_real_,
+      change_ratio = NA_real_,
+      max = NA_real_,
+      min = NA_real_
+    ))
+  }
   
-  c(
+  tibble(
     median = median(vec, na.rm = TRUE),
     amplitude = unname(quantile(vec, 0.95, na.rm = TRUE) - quantile(vec, 0.05, na.rm = TRUE)),
     change_ratio = median(diff(round(vec, 6)), na.rm = TRUE),
@@ -173,22 +183,19 @@ index_compute <- function(vec) {
   )
 }
 
-# function application
+
 data_sem_indices <- data_sem_raw %>%
   arrange(position, orientation, depth, date) %>%
   group_by(position, orientation, depth) %>%
-  mutate(
-    temp_index  = slide(temp,  index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
-    hum_index   = slide(hum,   index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
-    fauna_index = slide(fauna, index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE),
-    root_index  = slide(root,  index_compute_function, .before = 0, .after = window_size - 1, .complete = TRUE)
-  ) %>%
-  unnest(cols = c(temp_index, hum_index, fauna_index, root_index),
-    names_sep = "_")
+  mutate(across( all_of(vars_to_index),
+      ~ slide(.x, index_compute_tibble, .before = 0, .after = window_size - 1, .complete = TRUE),.names = "{.col}_index")) %>%
+  unnest(cols = c(temp_index, hum_index, fauna_index, root_index), names_sep = "_") %>%
+  ungroup()
+
 
 # index selection
 # based on a dimensionality reduction procedure
-microclim_data <- data_sem_indices %>%
+microclim_data <- data_sem_indices %>% ungroup() %>%
   select(starts_with(c("temp", "hum")))%>%
   drop_na() 
 
@@ -203,6 +210,42 @@ microclimate_index <- combn(var_names, 2, function(p) {
   { pair_matrix <- combn(var_names, 2); pair_matrix[, which.min(.)] }
 
 cat("Microclimate index selected :", microclimate_index[1], "and", microclimate_index[2])
+
+
+```
+
+Graphical representation of indices relative to initial variables
+
+```{r}
+fauna_index <- data_sem_indices %>% 
+  ggplot(aes(date))+
+  geom_line(aes(y= fauna), color="#AAC4F5")+
+  geom_line(aes(y=fauna_index_median))+
+  facet_grid(depth+orientation~position)+
+  theme_minimal()
+
+root_index <- data_sem_indices %>% 
+  ggplot(aes(date))+
+  geom_line(aes(y= root), color="#C1E59F")+
+  geom_line(aes(y=root_index_median))+
+  facet_grid(depth+orientation~position)+
+  theme_minimal()
+
+temp_index <- data_sem_indices %>% 
+  ggplot(aes(date))+
+  geom_line(aes(y= temp), color="#FF937E")+
+  geom_line(aes(y=temp_index_median))+
+  facet_grid(depth~position)+
+  theme_minimal()
+
+hum_index <- data_sem_indices %>% filter(orientation=="O")%>%
+  ggplot(aes(date))+
+  geom_line(aes(y= hum), color="#FCB53B")+
+  geom_line(aes(y=hum_index_amplitude))+
+  facet_grid(depth~position)+
+  theme_minimal()
+
+panel <- (fauna_index | root_index) / (temp_index | hum_index)
 ```
 
 #### SEM model
@@ -210,7 +253,8 @@ cat("Microclimate index selected :", microclimate_index[1], "and", microclimate_
 ```{r}
 # database cleaning
 data_sem <- data_sem_indices %>%
-  select(date, position, depth, orientation, fauna_index_median, root_index_median, microclimate_index[1], microclimate_index[2])%>%
+  mutate(time_step = floor_date(date, unit = "week"))%>%
+  select(date, time_step, position, depth, orientation, fauna_index_median, root_index_median, microclimate_index[1], microclimate_index[2])%>%
   rename("root" = root_index_median, 
          "fauna" = fauna_index_median,
          "microclimate_index_1" = microclimate_index[1],
@@ -222,13 +266,11 @@ sem_fit <- function(data) {
   psem(
     lme(root ~ microclimate_index_1 + microclimate_index_2, 
         data = data, 
-        random = ~1 | orientation/depth, 
-        correlation = corAR1(form = ~1 | orientation/depth)),
+        random = ~1 | orientation/depth),
     
     lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root, 
         data = data, 
-        random = ~1 | orientation/depth, 
-        correlation = corAR1(form = ~1 | orientation/depth)),
+        random = ~1 | orientation/depth),
     
     microclimate_index_1 %~~% microclimate_index_2
   )
@@ -237,34 +279,148 @@ sem_fit <- function(data) {
 
 #### Verification of model fit
 
-⚠️ **to do** ⚠️️
+```{r}
+model_root_A <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
+        data = data_sem%>% filter(position=="A"), 
+        random = ~1 | orientation/depth)
+model_fauna_A <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
+        data = data_sem%>% filter(position=="A"), 
+        random = ~1 | orientation/depth)
+
+model_root_C <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
+        data = data_sem%>% filter(position=="C"), 
+        random = ~1 | orientation/depth)
+model_fauna_C <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
+        data = data_sem%>% filter(position=="C"), 
+        random = ~1 | orientation/depth)
+
+check_model(model_root_A)
+check_model(model_fauna_A)
+check_model(model_root_C)
+check_model(model_fauna_C)
+```
 
 #### SEM application
 
-depending on the position and time step, but the problem is that there is not enough data
-
 ```{r}
 positions <- c("A", "C")
-dates <- unique(data_sem$date)
+time_steps <- as.character(unique(data_sem$time_step))
 models_date <- list()
 
 for (pos in positions) {
-  for (d in dates) {
+  for (t in time_steps) {
     
     data_subset <- data_sem %>%
       mutate(depth = as.factor(depth)) %>%
-      filter(position == pos, date == d)
+      filter(position == pos, as.character(time_step) == t)
     
-    if (nrow(data_subset) > 0) {
-      cat("\nposition", pos, "-", d, ":", nrow(data_subset), "observations used\n")
-      models_date[[paste0("model_", pos, "_", d)]] <- sem_fit(data_subset)
+    if (nrow(data_subset) < 10) {
+      cat("\nposition", pos, "-", t, ": skipped (not enough data)\n")
+      next
+    }
+    
+    cat("\nposition", pos, "-", t, ":", nrow(data_subset), "observations used\n")
+    
+    mod <- tryCatch(
+      sem_fit(data_subset),
+      error = function(e) {
+        cat("  → model failed: singular or non-identifiable\n")
+        return(NULL)
+      }
+    )
+    
+    if (!is.null(mod)) {
+      # stocker le modèle, le time_step et la position
+      models_date[[paste0("model_", pos, "_", t)]] <- list(
+        model = mod,
+        time_step = t,   # string pour l'instant
+        position = pos
+      )
     }
   }
 }
 
+extract_results <- function(model_name, model_list) {
+  sm <- summary(model_list$model)
+  coef_table <- as.data.frame(sm$coefficients)
+  
+  p_clean <- coef_table$P.Value |>
+    as.character() |>
+    stringr::str_replace("<", "") |>
+    as.numeric()
+  
+  tibble::tibble(
+    model = model_name,
+    time_step = model_list$time_step,
+    position = model_list$position,
+    response = coef_table$Response,
+    predictor = coef_table$Predictor,
+    estimate = coef_table$Estimate,
+    se = coef_table$Std.Error,
+    df = coef_table$DF,
+    t_value = coef_table$t.value,
+    p_value = p_clean
+  )
+}
 
-summaries <- lapply(models_date, summary)
+results_df <- purrr::map2_dfr(
+  names(models_date),
+  models_date,
+  extract_results
+)
 
+# reconvertir time_step en POSIXct
+results_df <- results_df %>%
+  mutate(time_step = as.POSIXct(time_step, format = "%Y-%m-%d", tz = "UTC"))
+
+```
+
+Graphical representation of the SEM results
+
+```{r}
+microclimate_index_name  <- c("microclimate_index_1" = microclimate_index[1],
+                 "microclimate_index_2" = microclimate_index[2])
+
+g1 <- results_df %>%
+  filter(!str_detect(predictor, "~~") & response != "") %>%
+  mutate(se = as.numeric(se)) %>%
+  ggplot(aes(time_step, estimate, group = position, color = position, fill = position)) + 
+  geom_hline(yintercept = 0, color= "#FF3838", linetype = "dashed") +
+  geom_ribbon(aes(ymin = estimate - se, ymax = estimate + se), alpha = 0.4, color = NA) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(values = position_palette) +
+  scale_fill_manual(values = position_palette) +  
+  facet_grid(predictor ~ response,scales = "free_y", labeller = labeller(
+      response = as_labeller(function(x) paste0("Response: ", x)),
+      predictor = as_labeller(microclimate_index_name))) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "2 months") +
+  labs(x = "Date", y = "Estimate") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12))
+
+
+g2 <-results_df %>%
+  filter(!str_detect(predictor, "~~") & response != "") %>%
+  ggplot(aes(time_step, estimate, group = position, color = position)) + 
+  geom_hline(yintercept = 0, color= "#FF3838", linetype = "dashed") +
+  geom_smooth(method = "loess", size = 1.5, se = TRUE, alpha = 0.1) +
+  scale_color_manual(values = position_palette) +
+  facet_grid(predictor ~ response,scales = "free_y", labeller = labeller(
+    response = as_labeller(function(x) paste0("Response: ", x)),
+    predictor = as_labeller(microclimate_index_name))) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "2 months") +
+  labs(x = "Date", y = "Smoothed estimators (loess method)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12))
+
+print(g1)
+print(g2)
 ```
 
 ### DYNAMICAL SEM
@@ -272,54 +428,54 @@ summaries <- lapply(models_date, summary)
 ```{r}
 ## model 
 sem = "
-  hum_20_O -> root_20_O, 0, x2
-  temp_20_O -> root_20_O, 0, x3
-  hum_20_O -> fauna_20_O, 0, x4
-  temp_20_O -> fauna_20_O, 0, x5
+  microclimate_index_1_20_O -> root_20_O, 0, x2
+  microclimate_index_2_20_O -> root_20_O, 0, x3
+  microclimate_index_1_20_O -> fauna_20_O, 0, x4
+  microclimate_index_2_20_O -> fauna_20_O, 0, x5
   root_20_O -> fauna_20_O, 0, x6
 
-  hum_20_E -> root_20_E, 0, x2
-  temp_20_E -> root_20_E, 0, x3
-  hum_20_E -> fauna_20_E, 0, x4
-  temp_20_E -> fauna_20_E, 0, x5
+  microclimate_index_1_20_E -> root_20_E, 0, x2
+  microclimate_index_2_20_E -> root_20_E, 0, x3
+  microclimate_index_1_20_E -> fauna_20_E, 0, x4
+  microclimate_index_2_20_E -> fauna_20_E, 0, x5
   root_20_E -> fauna_20_E, 0, x6
 
-  hum_50_O -> root_50_O, 0, x2
-  temp_50_O -> root_50_O, 0, x3
-  hum_50_O -> fauna_50_O, 0, x4
-  temp_50_O -> fauna_50_O, 0, x5
+  microclimate_index_1_50_O -> root_50_O, 0, x2
+  microclimate_index_2_50_O -> root_50_O, 0, x3
+  microclimate_index_1_50_O -> fauna_50_O, 0, x4
+  microclimate_index_2_50_O -> fauna_50_O, 0, x5
   root_50_O -> fauna_50_O, 0, x6
 
-  hum_50_E -> root_50_E, 0, x2
-  temp_50_E -> root_50_E, 0, x3
-  hum_50_E -> fauna_50_E, 0, x4
-  temp_50_E -> fauna_50_E, 0, x5
+  microclimate_index_1_50_E -> root_50_E, 0, x2
+  microclimate_index_2_50_E -> root_50_E, 0, x3
+  microclimate_index_1_50_E -> fauna_50_E, 0, x4
+  microclimate_index_2_50_E -> fauna_50_E, 0, x5
   root_50_E -> fauna_50_E, 0, x6
 
 
   # AR1
-  hum_20_O -> root_20_O, 1, ar2
-  temp_20_O -> root_20_O, 1, ar3
-  hum_20_O -> fauna_20_O, 1, ar4
-  temp_20_O -> fauna_20_O, 1, ar5
+  microclimate_index_1_20_O -> root_20_O, 1, ar2
+  microclimate_index_2_20_O -> root_20_O, 1, ar3
+  microclimate_index_1_20_O -> fauna_20_O, 1, ar4
+  microclimate_index_2_20_O -> fauna_20_O, 1, ar5
   root_20_O -> fauna_20_O, 1, ar6
 
-  hum_20_E -> root_20_E, 1, ar2
-  temp_20_E -> root_20_E, 1, ar3
-  hum_20_E -> fauna_20_E, 1, ar4
-  temp_20_E -> fauna_20_E, 1, ar5
+  microclimate_index_1_20_E -> root_20_E, 1, ar2
+  microclimate_index_2_20_E -> root_20_E, 1, ar3
+  microclimate_index_1_20_E -> fauna_20_E, 1, ar4
+  microclimate_index_2_20_E -> fauna_20_E, 1, ar5
   root_20_E -> fauna_20_E, 1, ar6
 
-  hum_50_O -> root_50_O, 1, ar2
-  temp_50_O -> root_50_O, 1, ar3
-  hum_50_O -> fauna_50_O, 1, ar4
-  temp_50_O -> fauna_50_O, 1, ar5
+  microclimate_index_1_50_O -> root_50_O, 1, ar2
+  microclimate_index_2_50_O -> root_50_O, 1, ar3
+  microclimate_index_1_50_O -> fauna_50_O, 1, ar4
+  microclimate_index_2_50_O -> fauna_50_O, 1, ar5
   root_50_O -> fauna_50_O, 1, ar6
 
-  hum_50_E -> root_50_E, 1, ar2
-  temp_50_E -> root_50_E, 1, ar3
-  hum_50_E -> fauna_50_E, 1, ar4
-  temp_50_E -> fauna_50_E, 1, ar5
+  microclimate_index_1_50_E -> root_50_E, 1, ar2
+  microclimate_index_2_50_E -> root_50_E, 1, ar3
+  microclimate_index_1_50_E -> fauna_50_E, 1, ar4
+  microclimate_index_2_50_E -> fauna_50_E, 1, ar5
   root_50_E -> fauna_50_E, 1, ar6
 "
 ```
@@ -327,7 +483,7 @@ sem = "
 ```{r}
 ## values extraction function
 get_part = function(x){
-  vars = c("hum", "temp", "fauna", "root")
+  vars = c("microclimate_index_1", "microclimate_index_2", "fauna", "root")
   index = sapply( vars, FUN=\(y) grep(y,rownames(x$coef))[1] )
   x$coef = x$coef[index,index]
   dimnames(x$coef) = list( vars, vars )
@@ -341,10 +497,10 @@ run_dsem_model <- function(data, site_pos, sem, nrows_sample = NULL) {
   
   data_wide <- data %>%
     filter(position == site_pos) %>%
-    select(-season, -position) %>%
+    select(-position) %>%
     pivot_wider(
       names_from = c(depth, orientation),
-      values_from = c(hum, temp, fauna, root),
+      values_from = c(microclimate_index_1, microclimate_index_2, fauna, root),
       values_fn = mean
     )
   
@@ -367,7 +523,7 @@ plot_dsem_results <- function(fit, data_wide) {
   
   # Fonction utilitaire pour extraire les coefficients utiles
   get_part <- function(x) {
-    vars <- c("hum", "temp", "fauna", "root")
+    vars <- c("microclimate_index_1", "microclimate_index_2", "fauna", "root")
     index <- sapply(vars, FUN = \(y) grep(y, rownames(x$coef))[1])
     x$coef <- x$coef[index, index]
     dimnames(x$coef) <- list(vars, vars)
