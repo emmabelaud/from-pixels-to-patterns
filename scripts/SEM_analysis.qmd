@@ -19,7 +19,7 @@ invisible(Sys.setlocale("LC_TIME", "C"))
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme", "zoo"),require,character.only = TRUE))
 
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
@@ -155,12 +155,10 @@ variable_distribution_2
 
 #### Parameters definition
 
-Definition of the time integration step parameters and maximum allowable missing data rate for calculating the indices.
-
-📌 Once the analytical procedure has been established, the influence of these parameters on the results will need to be explored in order to adapt them as necessary.
+Definition of the time integration step parameters and maximum allowable missing data rate for calculating the microclimate indices \> **Choice of the daily scale for the moment. But should we use indices? And if so, at what intervals? This choice requires careful consideration ⚠️**
 
 ```{r}
-time_step_days <- 7
+time_step_days <- 1
 window_size <- time_step_days * 4
 missing_data_rate <- 0.3
 ```
@@ -169,7 +167,7 @@ missing_data_rate <- 0.3
 
 ```{r}
 # function to compute indices
-vars_to_index <- c("temp", "hum", "fauna", "root")
+vars_to_index <- c("temp", "hum")
 index_names <- c("median", "amplitude", "change_ratio", "max", "min")
 
 index_compute_function <- function(vec) {
@@ -226,7 +224,7 @@ microclim_data <- data_sem_indices %>% ungroup() %>%
   drop_na() 
 
 acp_microclimate <- dudi.pca(microclim_data, scannf = FALSE, nf = 2)
-s.corcircle(acp_microclimate$co)
+#s.corcircle(acp_microclimate$co)
 var_coord <- acp_microclimate$co[, 1:2]
 var_names <- rownames(var_coord)
 
@@ -243,37 +241,42 @@ Graphical representation of indices relative to initial variables
 ```{r}
 #| class: full-width
 #| dpi: 72
-fauna_index <- data_sem_indices %>% 
-  ggplot(aes(date))+
-  geom_line(aes(y= fauna), color="#AAC4F5")+
-  geom_line(aes(y=fauna_index_median))+
-  facet_grid(depth+orientation~position)+
-  theme_minimal()
 
-root_index <- data_sem_indices %>% 
+temp_index_1 <- data_sem_indices %>% 
   ggplot(aes(date))+
-  geom_line(aes(y= root), color="#C1E59F")+
-  geom_line(aes(y=root_index_median))+
+  geom_line(aes(y= temp), color="#AAC4F5")+
+  geom_line(aes(y=temp_index_median))+
   facet_grid(depth+orientation~position)+
-  theme_minimal()
+  theme_minimal()+
+  ggtitle("Median temperature")
 
-temp_index <- data_sem_indices %>% 
+hum_index_1 <- data_sem_indices %>% 
+  ggplot(aes(date))+
+  geom_line(aes(y= hum), color="#C1E59F")+
+  geom_line(aes(y=hum_index_median))+
+  facet_grid(depth+orientation~position)+
+  theme_minimal()+
+  ggtitle("Median humidity")
+
+temp_index_2 <- data_sem_indices %>% 
   ggplot(aes(date))+
   geom_line(aes(y= temp), color="#FF937E")+
-  geom_line(aes(y=temp_index_median))+
+  geom_line(aes(y=temp_index_amplitude))+
   facet_grid(depth~position)+
-  theme_minimal()
+  theme_minimal()+
+  ggtitle("Daily temperature amplitude")
 
-hum_index <- data_sem_indices %>% filter(orientation=="O")%>%
+hum_index_2 <- data_sem_indices %>% filter(orientation=="O")%>%
   ggplot(aes(date))+
   geom_line(aes(y= hum), color="#FCB53B")+
   geom_line(aes(y=hum_index_amplitude))+
   facet_grid(depth~position)+
-  theme_minimal()
+  theme_minimal()+
+  ggtitle("Daily humidity amplitude")
 
-panel <- (fauna_index | root_index) / (temp_index | hum_index) + plot_annotation(title = "Distribution, over time and space, of calculated indices (in black) relative to initial variables (in color)")
+panel <- (temp_index_1 | hum_index_1) / (temp_index_2 | hum_index_2) + plot_annotation(title = "Distribution, over time and space, of calculated indices (in black) relative to initial variables (in color)")
 
-invisible(tiff("../output/variable_indices_distribution.tiff", width = 4000, height = 2600, res = 300))
+invisible(tiff("../output/variable_indices_distribution.tiff", width = 3000, height = 3000, res = 300))
 panel
 invisible(dev.off())
 
@@ -283,48 +286,66 @@ panel
 #### SEM model
 
 ```{r}
-# database cleaning
-data_sem <- data_sem_indices %>%
-  mutate(time_step = floor_date(date, unit = "week"))%>%
-  select(date, time_step, position, depth, orientation, fauna_index_median, root_index_median, microclimate_index[1], microclimate_index[2])%>%
-  rename("root" = root_index_median, 
-         "fauna" = fauna_index_median,
-         "microclimate_index_1" = microclimate_index[1],
-         "microclimate_index_2" = microclimate_index[2])%>%
-  drop_na()
+# Define window size (in days) and allowed missing-data rate
+window_days <- 14       
+step_days   <- 1      
+missing_data_rate <- 0.3
 
-#Function for modelling SEM
-sem_fit <- function(data) {
-  psem(
-    lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data, 
-        random = ~1 | orientation/depth),
-    
-    lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root, 
-        data = data, 
-        random = ~1 | orientation/depth),
-    
-    microclimate_index_1 %~~% microclimate_index_2
+
+data_sem <- data_sem_indices %>% 
+  rename(
+    microclimate_index_1 = microclimate_index[1],
+    microclimate_index_2 = microclimate_index[2]
+  ) %>%
+  select(date, position, orientation, depth, fauna, root,
+         microclimate_index_1, microclimate_index_2)%>% 
+  mutate(depth = as.factor(depth))
+
+# Function to generate rolling windows for a given dataset:
+create_rolling_windows <- function(df, window_days, step_days) {
+  start_dates <- seq(
+    min(df$date),
+    max(df$date) - days(window_days) + hours(6),
+    by = paste(step_days, "days")
   )
+  
+  # Subset data for each window
+  windows <- map(start_dates, function(start_dt) {
+    df %>% filter(date >= start_dt & date < start_dt + days(window_days))
+  })
+  
+  # Name each window by its start date
+  names(windows) <- format(start_dates, "%Y-%m-%d")
+  windows
 }
+
+# Build rolling windows separately for each position:
+windows_list <- data_sem %>%
+  group_by(position) %>%
+  group_map(~ create_rolling_windows(.x, window_days, step_days), .keep = TRUE)
+names(windows_list) <- unique(data_sem$position)
 ```
 
 #### Verification of model fit
 
 ```{r}
 model_root_A <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data_sem%>% filter(position=="A"), 
-        random = ~1 | orientation/depth)
+        data = data_sem%>% filter(position=="A") %>% drop_na(), 
+        random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth))
 model_fauna_A <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-        data = data_sem%>% filter(position=="A"), 
-        random = ~1 | orientation/depth)
+        data = data_sem%>% filter(position=="A") %>% drop_na(), 
+        random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth))
 
 model_root_C <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data_sem%>% filter(position=="C"), 
-        random = ~1 | orientation/depth)
+        data = data_sem%>% filter(position=="C") %>% drop_na(), 
+        random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth))
 model_fauna_C <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-        data = data_sem%>% filter(position=="C"), 
-        random = ~1 | orientation/depth)
+        data = data_sem%>% filter(position=="C") %>% drop_na(), 
+        random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth))
 
 cat("performance model *root ~ microclimate_index_1 + microclimate_index_2* for unmanaged system")
 check_model(model_root_A)
@@ -339,73 +360,84 @@ check_model(model_fauna_C)
 #### SEM application
 
 ```{r}
-positions <- c("A", "C")
-time_steps <- as.character(unique(data_sem$time_step))
-models_date <- list()
+# Function defining the SEM structure 
+sem_fit <- function(data) {
+  psem(
+    lme(root ~ microclimate_index_1 + microclimate_index_2,
+        data = data, random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth)),
+    lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
+        data = data, 
+        random = ~1 | orientation/depth,
+        correlation = corAR1(form = ~1 | orientation/depth)),
+    microclimate_index_1 %~~% microclimate_index_2
+  )
+}
 
-for (pos in positions) {
-  for (t in time_steps) {
+# Storage for fitted models from all rolling windows
+results_list <- list()
+
+# Loop over each position and each time window
+for(pos in names(windows_list)) {
+  for(window_name in names(windows_list[[pos]])) {
     
-    data_subset <- data_sem %>%
-      mutate(depth = as.factor(depth)) %>%
-      filter(position == pos, as.character(time_step) == t)
+    data_window <- windows_list[[pos]][[window_name]] %>%
+           drop_na()
     
-    if (nrow(data_subset) < 10) {
-      next
-    }
+    # Skip windows with insufficient data based on allowed missing rate
+    if(nrow(data_window)/(window_days*16) < missing_data_rate) next
     
-    
+    # Fit SEM (skip windows that fail to converge)
     mod <- tryCatch(
-      sem_fit(data_subset),
-      error = function(e) {
-        return(NULL)
-      }
+      sem_fit(data_window),
+      error = function(e) NULL
     )
     
-    if (!is.null(mod)) {
-      # stocker le modèle, le time_step et la position
-      models_date[[paste0("model_", pos, "_", t)]] <- list(
+    # Store successful model fits
+    if(!is.null(mod)) {
+      results_list[[paste(pos, window_name, sep = "_")]] <- list(
         model = mod,
-        time_step = t,   # string pour l'instant
+        time_window_start = window_name,
         position = pos
       )
     }
   }
 }
 
-extract_results <- function(model_name, model_list) {
-  sm <- summary(model_list$model)
+# Function to extract coefficients from a fitted SEM:
+extract_results <- function(model_name, model_info) {
+  sm <- summary(model_info$model)
   coef_table <- as.data.frame(sm$coefficients)
   
-  p_clean <- coef_table$P.Value |>
-    as.character() |>
-    stringr::str_replace("<", "") |>
+  p_clean <- coef_table$P.Value %>%
+    as.character() %>%
+    stringr::str_replace("<", "") %>%
     as.numeric()
   
   tibble::tibble(
-    model = model_name,
-    time_step = model_list$time_step,
-    position = model_list$position,
-    response = coef_table$Response,
-    predictor = coef_table$Predictor,
-    estimate = coef_table$Estimate,
-    se = coef_table$Std.Error,
-    df = coef_table$DF,
-    t_value = coef_table$t.value,
-    p_value = p_clean
+    model            = model_name,
+    time_window_start = model_info$time_window_start,
+    position         = model_info$position,
+    response         = coef_table$Response,
+    predictor        = coef_table$Predictor,
+    estimate         = coef_table$Estimate,
+    se               = coef_table$Std.Error,
+    df               = coef_table$DF,
+    t_value          = coef_table$t.value,
+    p_value          = p_clean
   )
 }
 
-results_df <- purrr::map2_dfr(
-  names(models_date),
-  models_date,
+# Convert list of model outputs into a single tidy dataframe
+results_df <- map2_dfr(
+  names(results_list),
+  results_list,
   extract_results
 )
-
-# reconvertir time_step en POSIXct
 results_df <- results_df %>%
-  mutate(time_step = as.POSIXct(time_step, format = "%Y-%m-%d", tz = "UTC"))
-
+  mutate(time_step = as.POSIXct(time_window_start,
+                                format = "%Y-%m-%d",
+                                tz = "UTC"))
 ```
 
 Graphical representation of the SEM results
@@ -440,6 +472,7 @@ g1 <- results_df %>%
 invisible(tiff("../output/Estimates_SEM_regression_distribution.tiff", width = 3000, height = 2000, res = 300))
 g1
 invisible(dev.off())
+g1
 ```
 
 ```{r}
@@ -507,4 +540,5 @@ g2 <- ggplot(results_smooth,
 invisible(tiff("../output/Smoothed_estimates_SEM_regression_distribution.tiff", width = 3000, height = 2000, res = 300))
 g2
 invisible(dev.off())
+g2
 ```
