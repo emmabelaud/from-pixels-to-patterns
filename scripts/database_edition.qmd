@@ -30,34 +30,42 @@ df <- df_raw %>%
   mutate(date = ymd_hms(date), 
       date = if_else(minute(date) == 1 & !any(minute(date) == 0),  
       date - minutes(1),date), 
-         hour = hour(date),minute = minute(date)) %>% # Some timestamps are recorded at minute = 1 instead of minute = 0.In some cases both exist, in others only minute = 1 exists. We want to correct minute = 1 to 0 only if there is no existing row at minute = 0.
+         hour = hour(date),minute = minute(date)) %>% 
+# Some timestamps are recorded at minute = 1 instead of minute = 0.In some cases both exist, in others only minute = 1 exists. We want to correct minute = 1 to 0 only if there is no existing row at minute = 0.
   filter(date> "2024-03-01 00:00:00")%>%
   filter(minute == 0, hour %in% c(0, 6, 12, 18))
-
-
-
-
-taxon_list <- unique(df$Predicted.class)
-scanner_list <- unique(df$scanner)
-
-position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 ```
 
 Selection of the most observed taxa (\> 3000 occurrences)
 
 ```{r}
-taxa_recode <- df %>% mutate(taxa_levelup = case_when( Predicted.class %in% c("pseudosinella", "poduromorpha") ~ "collembola",Predicted.class %in% c("trombidiformes", "mesostigmata") ~ "acari", TRUE ~ Predicted.class))
+filter_taxa_df <- function(df, filter_taxa = TRUE, min_occurrences = 3000) {
+  
+  # Recode some taxa to higher level
+  df <- df %>% 
+    mutate(taxa_levelup = case_when(
+      Predicted.class %in% c("pseudosinella", "poduromorpha") ~ "collembola",
+      Predicted.class %in% c("trombidiformes", "mesostigmata") ~ "acari",
+      TRUE ~ Predicted.class
+    ))
+  
+  if(filter_taxa) {
+    # Identify taxa with enough occurrences
+    relevant_taxa <- df %>% 
+      group_by(Predicted.class) %>% 
+      summarise(total_occurrences = n(), .groups = "drop") %>% 
+      filter(total_occurrences >= min_occurrences) %>% 
+      select(Predicted.class)
 
-relevant_taxa <- df %>% 
-  group_by(Predicted.class) %>% 
-  summarise(total_occurrences = n(), .groups = "drop") %>% 
-  filter(total_occurrences >= 3000) %>% 
-  select(Predicted.class) 
+    df <- df %>% filter(Predicted.class %in% relevant_taxa$Predicted.class)
+    
+    cat(nrow(relevant_taxa), "selected taxa:", relevant_taxa$Predicted.class, "\n")
+  }
+  
+  return(df)
+}
 
-df_filtered <- df %>% 
-  filter(Predicted.class %in% relevant_taxa$Predicted.class)
-
-cat(nrow(relevant_taxa), "selected taxa :", relevant_taxa$Predicted.class)
+df_filtered <- filter_taxa_df(df, filter_taxa = F)
 ```
 
 Completion of occurrence data with 0 for non-observations of invertebrates in images and NA for missing images.
@@ -67,7 +75,7 @@ seq_time <- seq(min(df$date), max(df$date), by = "6 hours")
 #Creation of complete grid of dates 
 complete_grid <- expand_grid(
   date = seq_time,
-  scanner = scanner_list)
+  scanner = unique(df$scanner))
 #Transition from df to abundance matrix
 df_complete <- df_filtered %>%
   group_by(Predicted.class, date, scanner, depth, position, orientation)%>%
