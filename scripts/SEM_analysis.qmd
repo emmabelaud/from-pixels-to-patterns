@@ -170,38 +170,54 @@ missing_data_rate <- 0.3
 ```{r}
 # function to compute indices
 vars_to_index <- c("temp", "hum", "fauna", "root")
-index_compute_tibble <- function(vec) {
-  n_total <- length(vec)
-  n_missing <- sum(is.na(vec))
-  
-  if (n_missing / n_total > missing_data_rate) {
-    return(tibble(
-      median = NA_real_,
-      amplitude = NA_real_,
-      change_ratio = NA_real_,
-      max = NA_real_,
-      min = NA_real_
-    ))
+index_names <- c("median", "amplitude", "change_ratio", "max", "min")
+
+index_compute_function <- function(vec) {
+  if (mean(is.na(vec)) > missing_data_rate) {
+    return(c(NA, NA, NA, NA, NA))
   }
-  
-  tibble(
-    median = median(vec, na.rm = TRUE),
-    amplitude = unname(quantile(vec, 0.95, na.rm = TRUE) - quantile(vec, 0.05, na.rm = TRUE)),
-    change_ratio = median(diff(round(vec, 6)), na.rm = TRUE),
-    max = unname(quantile(vec, 0.975, na.rm = TRUE)),
-    min = unname(quantile(vec, 0.025, na.rm = TRUE))
+  qs <- quantile(vec, c(0.025, 0.05, 0.95, 0.975), na.rm = TRUE)
+  diffs <- diff(round(vec, 6))
+  c(
+    median       = median(vec, na.rm = TRUE),
+    amplitude    = qs[3] - qs[2],
+    change_ratio = median(diffs, na.rm = TRUE),
+    max          = qs[4],
+    min          = qs[1]
   )
 }
 
+compute_index_roll <- function(x) {
+  res <- rollapplyr(
+    x,
+    width = window_size,
+    FUN = index_compute_function,
+    by.column = FALSE,
+    fill = NA
+  )
+  colnames(res) <- index_names
+  as_tibble(res)
+}
 
 data_sem_indices <- data_sem_raw %>%
   arrange(position, orientation, depth, date) %>%
   group_by(position, orientation, depth) %>%
-  mutate(across( all_of(vars_to_index),
-      ~ slide(.x, index_compute_tibble, .before = 0, .after = window_size - 1, .complete = TRUE),.names = "{.col}_index")) %>%
-  unnest(cols = c(temp_index, hum_index, fauna_index, root_index), names_sep = "_") %>%
+  mutate(across(
+    vars_to_index,
+    ~ compute_index_roll(.x),
+    .names = "{.col}_index"
+  )) %>%
   ungroup()
 
+list_cols <- grep("_index$", names(data_sem_indices), value = TRUE)
+
+for (col in list_cols) {
+  data_sem_indices <- data_sem_indices %>%
+    unnest_wider(
+      !!sym(col),
+      names_sep = "_"
+    )
+}
 
 # index selection
 # based on a dimensionality reduction procedure
@@ -210,7 +226,7 @@ microclim_data <- data_sem_indices %>% ungroup() %>%
   drop_na() 
 
 acp_microclimate <- dudi.pca(microclim_data, scannf = FALSE, nf = 2)
-#s.corcircle(acp_microclimate$co)
+s.corcircle(acp_microclimate$co)
 var_coord <- acp_microclimate$co[, 1:2]
 var_names <- rownames(var_coord)
 
