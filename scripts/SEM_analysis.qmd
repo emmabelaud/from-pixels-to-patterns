@@ -26,8 +26,11 @@ season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8AC
 
 # Données faune
 data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
-  mutate("root" = root_growth_cm2_count,
-         "fauna" = all_taxa)
+  mutate("hum" = hum_soil,
+         "temp" = temp_soil,
+         "root" = root_growth_cm2_count,
+         "fauna" = all_taxa,
+         position=as.factor(position))
 data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
 ```
 
@@ -151,6 +154,45 @@ invisible(dev.off())
 variable_distribution_2
 ```
 
+## Relation between macro/micro-climate according to land use
+
+```{r}
+data_sem_raw %>% 
+  ggplot(aes(date))+
+  geom_point(aes(y=temp_air), color="lightblue")+
+  geom_point(aes(y=temp_soil), color="orange")+
+  facet_wrap(depth~position)
+
+data_sem_raw %>% 
+  ggplot(aes(date))+
+  geom_point(aes(y=hum_air), color="lightblue")+
+  geom_point(aes(y=hum_soil), color="orange")+
+  facet_wrap(depth~position)
+```
+
+```{r}
+climate_data <- data_sem_raw %>%
+  select(position, depth, temp_soil, temp_air, hum_soil, hum_air)%>%
+  drop_na()
+
+temp_model <- lme(
+  temp_soil ~ temp_air * position,
+  random = ~ 1 | depth,
+  data   = climate_data)
+
+summary(temp_model)
+anova(temp_model)
+
+hum_model <- lme(
+  fixed  = hum_soil ~ hum_air * position,
+  random = ~ 1 | depth,
+  data   = climate_data
+)
+
+summary(hum_model)
+anova(hum_model)
+```
+
 ## Effects of land use on the relationships between biotic and abiotic drivers
 
 #### Parameters definition
@@ -228,10 +270,18 @@ acp_microclimate <- dudi.pca(microclim_data, scannf = FALSE, nf = 2)
 var_coord <- acp_microclimate$co[, 1:2]
 var_names <- rownames(var_coord)
 
-microclimate_index <- combn(var_names, 2, function(p) {
-  abs(cor(as.numeric(var_coord[p[1], ]), as.numeric(var_coord[p[2], ])))
-}) %>%
-  { pair_matrix <- combn(var_names, 2); pair_matrix[, which.min(.)] }
+# Calculate cos² (quality of representation) for each variable
+var_cos2 <- rowSums(var_coord^2)
+# filter variables with good representation (e.g., cos² > 0.7)
+good_vars <- var_names[var_cos2 >= 0.7]
+
+# Function to compute cosine of angle between two vectors
+cos_angle <- function(v1, v2) sum(v1 * v2) / (sqrt(sum(v1^2)) * sqrt(sum(v2^2)))
+
+# Find the pair of well-represented variables with minimal absolute cosine (most orthogonal)
+pair_matrix <- combn(good_vars, 2)
+i_min <- which.min(apply(pair_matrix, 2, function(p) cos_angle(var_coord[p[1], ], var_coord[p[2], ])))
+microclimate_index <- pair_matrix[, i_min]
 
 cat("Microclimate index selected :", microclimate_index[1], "and", microclimate_index[2])
 ```

@@ -203,7 +203,8 @@ Selection of humidity and temperature data
 
 ```{r}
 data_sem  <- data_sem %>% 
-  left_join(soil_probe_data %>% rename(hum=hum_soil, temp=temp_soil) %>% select(depth, position,date, hum, temp),by = c("date" , "depth", "position")) 
+  left_join(soil_probe_data ,by = c("date" , "depth", "position")) %>% 
+  left_join(air_probe_data, by = c("date" ,  "position")) 
 ```
 
 ## Roots data
