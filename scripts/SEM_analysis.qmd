@@ -19,7 +19,7 @@ invisible(Sys.setlocale("LC_TIME", "C"))
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme", "zoo"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme", "zoo", "jsonlite"),require,character.only = TRUE))
 
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
@@ -154,184 +154,7 @@ invisible(dev.off())
 variable_distribution_2
 ```
 
-## Relation between macro/micro-climate according to land use
-
-```{r}
-data_sem_raw %>% 
-  ggplot(aes(date))+
-  geom_point(aes(y=temp_air), color="lightblue")+
-  geom_point(aes(y=temp_soil), color="orange")+
-  facet_wrap(depth~position)
-
-data_sem_raw %>% 
-  ggplot(aes(date))+
-  geom_point(aes(y=hum_air), color="lightblue")+
-  geom_point(aes(y=hum_soil), color="orange")+
-  facet_wrap(depth~position)
-```
-
-```{r}
-climate_data <- data_sem_raw %>%
-  select(position, depth, temp_soil, temp_air, hum_soil, hum_air)%>%
-  drop_na()
-
-temp_model <- lme(
-  temp_soil ~ temp_air * position,
-  random = ~ 1 | depth,
-  data   = climate_data)
-
-summary(temp_model)
-anova(temp_model)
-
-hum_model <- lme(
-  fixed  = hum_soil ~ hum_air * position,
-  random = ~ 1 | depth,
-  data   = climate_data
-)
-
-summary(hum_model)
-anova(hum_model)
-```
-
 ## Effects of land use on the relationships between biotic and abiotic drivers
-
-#### Parameters definition
-
-Definition of the time integration step parameters and maximum allowable missing data rate for calculating the microclimate indices \> **Choice of the daily scale for the moment. But should we use indices? And if so, at what intervals? This choice requires careful consideration ⚠️**
-
-```{r}
-time_step_days <- 1
-window_size <- time_step_days * 4
-missing_data_rate <- 0.3
-```
-
-#### Calculation of indices
-
-```{r}
-# function to compute indices
-vars_to_index <- c("temp", "hum")
-index_names <- c("median", "amplitude", "change_ratio", "max", "min")
-
-index_compute_function <- function(vec) {
-  if (mean(is.na(vec)) > missing_data_rate) {
-    return(c(NA, NA, NA, NA, NA))
-  }
-  qs <- quantile(vec, c(0.025, 0.05, 0.95, 0.975), na.rm = TRUE)
-  diffs <- diff(round(vec, 6))
-  c(
-    median       = median(vec, na.rm = TRUE),
-    amplitude    = qs[3] - qs[2],
-    change_ratio = median(diffs, na.rm = TRUE),
-    max          = qs[4],
-    min          = qs[1]
-  )
-}
-
-compute_index_roll <- function(x) {
-  res <- rollapplyr(
-    x,
-    width = window_size,
-    FUN = index_compute_function,
-    by.column = FALSE,
-    fill = NA
-  )
-  colnames(res) <- index_names
-  as_tibble(res)
-}
-
-data_sem_indices <- data_sem_raw %>%
-  arrange(position, orientation, depth, date) %>%
-  group_by(position, orientation, depth) %>%
-  mutate(across(
-    vars_to_index,
-    ~ compute_index_roll(.x),
-    .names = "{.col}_index"
-  )) %>%
-  ungroup()
-
-list_cols <- grep("_index$", names(data_sem_indices), value = TRUE)
-
-for (col in list_cols) {
-  data_sem_indices <- data_sem_indices %>%
-    unnest_wider(
-      !!sym(col),
-      names_sep = "_"
-    )
-}
-
-# index selection
-# based on a dimensionality reduction procedure
-microclim_data <- data_sem_indices %>% ungroup() %>%
-  select(starts_with(c("temp", "hum")))%>%
-  drop_na() 
-
-acp_microclimate <- dudi.pca(microclim_data, scannf = FALSE, nf = 2)
-#s.corcircle(acp_microclimate$co)
-var_coord <- acp_microclimate$co[, 1:2]
-var_names <- rownames(var_coord)
-
-# Calculate cos² (quality of representation) for each variable
-var_cos2 <- rowSums(var_coord^2)
-# filter variables with good representation (e.g., cos² > 0.7)
-good_vars <- var_names[var_cos2 >= 0.7]
-
-# Function to compute cosine of angle between two vectors
-cos_angle <- function(v1, v2) sum(v1 * v2) / (sqrt(sum(v1^2)) * sqrt(sum(v2^2)))
-
-# Find the pair of well-represented variables with minimal absolute cosine (most orthogonal)
-pair_matrix <- combn(good_vars, 2)
-i_min <- which.min(apply(pair_matrix, 2, function(p) cos_angle(var_coord[p[1], ], var_coord[p[2], ])))
-microclimate_index <- pair_matrix[, i_min]
-
-cat("Microclimate index selected :", microclimate_index[1], "and", microclimate_index[2])
-```
-
-Graphical representation of indices relative to initial variables
-
-```{r}
-#| class: full-width
-#| dpi: 72
-
-temp_index_1 <- data_sem_indices %>% 
-  ggplot(aes(date))+
-  geom_line(aes(y= temp), color="#AAC4F5")+
-  geom_line(aes(y=temp_index_median))+
-  facet_grid(depth+orientation~position)+
-  theme_minimal()+
-  ggtitle("Median temperature")
-
-hum_index_1 <- data_sem_indices %>% 
-  ggplot(aes(date))+
-  geom_line(aes(y= hum), color="#C1E59F")+
-  geom_line(aes(y=hum_index_median))+
-  facet_grid(depth+orientation~position)+
-  theme_minimal()+
-  ggtitle("Median humidity")
-
-temp_index_2 <- data_sem_indices %>% 
-  ggplot(aes(date))+
-  geom_line(aes(y= temp), color="#FF937E")+
-  geom_line(aes(y=temp_index_amplitude))+
-  facet_grid(depth~position)+
-  theme_minimal()+
-  ggtitle("Daily temperature amplitude")
-
-hum_index_2 <- data_sem_indices %>% filter(orientation=="O")%>%
-  ggplot(aes(date))+
-  geom_line(aes(y= hum), color="#FCB53B")+
-  geom_line(aes(y=hum_index_amplitude))+
-  facet_grid(depth~position)+
-  theme_minimal()+
-  ggtitle("Daily humidity amplitude")
-
-panel <- (temp_index_1 | hum_index_1) / (temp_index_2 | hum_index_2) + plot_annotation(title = "Distribution, over time and space, of calculated indices (in black) relative to initial variables (in color)")
-
-invisible(tiff("../output/variable_indices_distribution.tiff", width = 3000, height = 3000, res = 300))
-panel
-invisible(dev.off())
-
-panel
-```
 
 #### SEM model
 
@@ -583,4 +406,279 @@ invisible(tiff("../output/Smoothed_estimates_SEM_regression_distribution.tiff", 
 g2
 invisible(dev.off())
 g2
+```
+
+#### SEM application by taxa
+
+select taxa list
+
+```{r}
+#json hierarchy file
+taxo <- fromJSON("/home/Shared/hierarchy.json")
+
+# keep only non-empty nodes
+taxo_filtered <- taxo[sapply(taxo, function(x) length(x) > 0)]
+
+# recursive function to get all descendants
+get_descendants <- function(node, tree) {
+  children <- tree[[node]]
+  if (is.null(children) || length(children) == 0) return(character(0))
+  
+  all_desc <- unlist(lapply(children, get_descendants, tree = tree), use.names = FALSE)
+  unique(c(children, all_desc))
+}
+
+# get all descendants of "fauna"
+all_fauna <- get_descendants("fauna", taxo_filtered)
+
+# identify terminal taxa
+leaves <- all_fauna[!sapply(all_fauna, function(x) !is.null(taxo_filtered[[x]]) && length(taxo_filtered[[x]]) > 0)]
+
+# remove a few exceptional leaves manually
+leaves <- leaves[!leaves %in% c("multi_taxa", "unknown", "egg", "pauropoda_symphyla")]
+
+# promote specific subgroups to higher taxonomic levels
+rename_map <- c("bdelloidea" = "trombidiformes",
+                "uropodina" = "mesostigmata",
+                "julida" = "diplopoda",
+                "polydesmida" = "diplopoda",
+                "polyxenida" = "diplopoda",
+                "geophilomorpha" ="chilopoda",
+                "lithobiomorpha" = "chilopoda")
+
+leaves_updated <- setdiff(leaves, names(rename_map))  # remove promoted children
+leaves_updated <- c(leaves_updated, rename_map)       # add the promoted parent taxa
+
+# keep only selected leaves and classes with >= 20 observations
+df_raw <- read.csv("../data/fauna_data.csv", sep = ",", na.strings = c("", "NA"))
+taxa_list <- df_raw %>%
+  filter(!is.na(Predicted.class))%>%
+  mutate(
+    position = substr(scanner, 4, 4),  # A, B, ou C
+    depth = substr(scanner, 5, 6),      # 20 ou 50
+    orientation = substr(scanner, 8, 8),     # O ou E
+    date = ymd_hms(date),
+    date = if_else(minute(date) == 1, date - minutes(1), date),
+    hour = hour(date),
+    minute = minute(date))%>%
+  filter(date> "2024-03-01 00:00:00")%>%
+  filter(minute == 0, hour %in% c(0, 6, 12, 18))%>%
+  mutate(Predicted.class = ifelse(Predicted.class %in% names(rename_map),
+                                  rename_map[Predicted.class],
+                                  Predicted.class)) %>%
+  filter(Predicted.class %in% leaves_updated) %>%
+  group_by(Predicted.class) %>%
+  mutate(n_taxon = n()) %>%
+  ungroup() %>%
+  mutate(prop_taxon = n_taxon / n()) %>%
+  filter(prop_taxon >= 0.1)
+
+# select remaining taxa
+fauna_vars <- intersect(
+  unique(taxa_list$Predicted.class),
+  names(data_sem_indices))
+```
+
+```{r}
+run_sem_for_taxon <- function(taxon_var,
+                              data_indices,
+                              microclimate_index,
+                              window_days = 14,
+                              step_days   = 1,
+                              missing_data_rate = 0.3) {
+
+  message("Running SEM for taxon: ", taxon_var)
+
+  # Préparer les données SEM
+  data_sem <- data_indices %>%
+    mutate(
+      fauna = !!sym(taxon_var),
+      microclimate_index_1 = !!sym(microclimate_index[1]),
+      microclimate_index_2 = !!sym(microclimate_index[2])
+    ) %>%
+    select(date, position, orientation, depth,
+           fauna, root,
+           microclimate_index_1, microclimate_index_2) %>%
+    mutate(depth = as.factor(depth))
+
+  # Rolling windows par position
+  windows_list <- data_sem %>%
+    group_by(position) %>%
+    group_map(~ create_rolling_windows(.x, window_days, step_days),
+              .keep = TRUE)
+
+  names(windows_list) <- unique(data_sem$position)
+
+  # SEM structure
+  sem_fit <- function(data) {
+    psem(
+      lme(root ~ microclimate_index_1 + microclimate_index_2,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+
+      lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+
+      microclimate_index_1 %~~% microclimate_index_2
+    )
+  }
+
+  # Stockage
+  results_list <- list()
+
+  for (pos in names(windows_list)) {
+    for (window_name in names(windows_list[[pos]])) {
+
+      data_window <- windows_list[[pos]][[window_name]] %>%
+        drop_na()
+
+      if (nrow(data_window) / (window_days * 16) < missing_data_rate) next
+
+      mod <- tryCatch(
+        sem_fit(data_window),
+        error = function(e) NULL
+      )
+
+      if (!is.null(mod)) {
+        results_list[[paste(taxon_var, pos, window_name, sep = "_")]] <-
+          list(
+            model = mod,
+            time_window_start = window_name,
+            position = pos
+          )
+      }
+    }
+  }
+
+  if (length(results_list) == 0) return(NULL)
+
+  # Extraction des estimates
+  extract_results <- function(model_name, model_info) {
+
+    sm <- summary(model_info$model)
+    coef_table <- as.data.frame(sm$coefficients)
+
+    p_clean <- coef_table$P.Value %>%
+      as.character() %>%
+      stringr::str_replace("<", "") %>%
+      as.numeric()
+
+    tibble(
+      model            = model_name,
+      taxon            = taxon_var,
+      position         = model_info$position,
+      time_window_start = model_info$time_window_start,
+      response         = coef_table$Response,
+      predictor        = coef_table$Predictor,
+      estimate         = coef_table$Estimate,
+      se               = coef_table$Std.Error,
+      df               = coef_table$DF,
+      t_value          = coef_table$t.value,
+      p_value          = p_clean
+    )
+  }
+
+  map2_dfr(
+    names(results_list),
+    results_list,
+    extract_results
+  ) %>%
+    mutate(time_step = as.POSIXct(time_window_start,
+                                  format = "%Y-%m-%d",
+                                  tz = "UTC"))
+}
+
+```
+
+```{r}
+results_all_taxa <- purrr::map_dfr(
+  fauna_vars,
+  run_sem_for_taxon,
+  data_indices = data_sem_indices,
+  microclimate_index = microclimate_index,
+  window_days = window_days,
+  step_days   = step_days,
+  missing_data_rate = missing_data_rate
+)
+
+```
+
+hypothesis about the global environmental force according system considered
+
+```{r}
+# Distribution of the SEM relationships significance
+g_sig_distrib <- results_all_taxa %>%
+  filter(response == "fauna") %>%
+  ggplot(aes(x = position, y = p_value, fill = position)) +
+  geom_jitter(alpha=0.1)+
+  geom_boxplot(alpha=0.5) +
+  scale_fill_manual(values = position_palette) +
+  labs(x = "SEM relationship",
+    y = "pvalue",
+    title = "Distribution of the SEM relationships significance "
+  ) +
+  facet_wrap(~taxon)+
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+
+g_sig_distrib
+
+# Distribution of the SEM relationships significance
+g_est_distrib <- results_all_taxa %>%
+  filter(response == "fauna") %>%
+  ggplot(aes(x = position, y = estimate, fill = position)) +
+  geom_hline(yintercept = 0, color="#FAAA99")+
+  geom_boxplot(alpha=0.5, outliers = F) +
+  scale_fill_manual(values = position_palette) +
+  labs(x = "SEM relationship",
+    y = "pvalue",
+    title = "Distribution of the SEM relationships estimates "
+  ) +
+  facet_grid(taxon ~ predictor, scale="free")+
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+
+g_est_distrib
+
+# dataframe construction
+g_sig_prop <- results_all_taxa %>%
+  filter(response == "fauna") %>%
+  mutate(significant = p_value < 0.05,
+    relation = paste(response, "~", predictor)) %>%
+  group_by(taxon, position, relation) %>%
+  summarise(
+    prop_significant = mean(significant, na.rm = TRUE),
+    n_windows = n(),
+    .groups = "drop")ggplot(
+  sig_prop,
+  aes(x = relation, y = prop_significant, fill = position)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  scale_fill_manual(values = position_palette) +
+  facet_wrap(~ taxon, scales = "free_x") +
+  labs(
+    x = "SEM relationship",
+    y = "Proportion of significant windows (p < 0.05)",
+    title = "Proportion of significant SEM relationships across taxa"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+
+g_sig_prop
+
+
 ```
