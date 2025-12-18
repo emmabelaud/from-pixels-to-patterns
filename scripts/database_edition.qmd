@@ -11,6 +11,7 @@ editor: visual
 library(tidyverse)
 library(lubridate)
 library(ade4)
+library(zoo)
 ```
 
 ## Fauna data
@@ -34,9 +35,62 @@ df <- df_raw %>%
   filter(minute == 0, hour %in% c(0, 6, 12, 18))
 ```
 
-### Taxa selection 
+Create file with an invertebrate taxa list
 
-First logic : Selection of the most observed taxa (\> 3000 occurrences)
+```{r}
+#json hierarchy file
+taxo <- fromJSON("/home/Shared/hierarchy.json")
+
+# keep only non-empty nodes
+taxo_filtered <- taxo[sapply(taxo, function(x) length(x) > 0)]
+
+# recursive function to get all descendants
+get_descendants <- function(node, tree) {
+  children <- tree[[node]]
+  if (is.null(children) || length(children) == 0) return(character(0))
+  
+  all_desc <- unlist(lapply(children, get_descendants, tree = tree), use.names = FALSE)
+  unique(c(children, all_desc))
+}
+
+# get all descendants of "fauna"
+all_fauna <- get_descendants("fauna", taxo_filtered)
+
+# identify terminal taxa
+leaves <- all_fauna[!sapply(all_fauna, function(x) !is.null(taxo_filtered[[x]]) && length(taxo_filtered[[x]]) > 0)]
+
+# remove a few exceptional leaves manually
+leaves <- leaves[!leaves %in% c("multi_taxa", "unknown", "egg", "pauropoda_symphyla")]
+
+# promote specific subgroups to higher taxonomic levels
+rename_map <- c("bdelloidea" = "trombidiformes",
+                "uropodina" = "mesostigmata",
+                "julida" = "diplopoda",
+                "polydesmida" = "diplopoda",
+                "polyxenida" = "diplopoda",
+                "geophilomorpha" ="chilopoda",
+                "lithobiomorpha" = "chilopoda")
+
+leaves_updated <- setdiff(leaves, names(rename_map))  # remove promoted children
+leaves_updated <- c(leaves_updated, rename_map)       # add the promoted parent taxa
+
+# keep only selected leaves and classes with >= 20 observations
+taxa_list <- df %>%
+  mutate(Predicted.class = ifelse(Predicted.class %in% names(rename_map),
+                                  rename_map[Predicted.class],
+                                  Predicted.class)) %>%
+  filter(Predicted.class %in% leaves_updated) %>%
+  group_by(Predicted.class) %>%
+  mutate(n_taxon = n()) %>%
+  ungroup() %>%
+  mutate(prop_taxon = n_taxon / n()) %>%
+  filter(prop_taxon >= 0.1)
+
+# select remaining taxa
+writeLines(unique(taxa_list$Predicted.class), con = "../output/fauna_vars.txt")
+```
+
+Function to select the most observed taxa (\> 3000 occurrences)
 
 ```{r}
 filter_taxa_df <- function(df, filter_taxa = TRUE, min_occurrences = 3000) {
@@ -300,6 +354,8 @@ data_sem <- data_sem %>%
       select(date, position, orientation, depth, all_of(microclimate_index)),
     by = c("date", "position", "orientation", "depth")
   )
+
+writeLines(microclimate_index, con = "../output/microclimate_index.txt")
 ```
 
 ## Roots data
