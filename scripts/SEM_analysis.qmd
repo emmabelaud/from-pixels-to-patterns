@@ -40,9 +40,6 @@ fauna_vars <- readLines("../output/fauna_vars.txt")
 microclimate_index <- readLines("../output/microclimate_index.txt")
 ```
 
-```{r}
-
-```
 
 ## Effect of land use on soil conditions
 
@@ -166,54 +163,11 @@ variable_distribution_2
 
 ## Effects of land use on the relationships between biotic and abiotic drivers
 
-#### SEM model
-
-```{r}
-# Define window size (in days) and allowed missing-data rate
-window_days <- 14       
-step_days   <- 1      
-missing_data_rate <- 0.3
-
-
-data_sem <- data_sem_raw %>% 
-  rename(
-    microclimate_index_1 = microclimate_index[1],
-    microclimate_index_2 = microclimate_index[2]
-  ) %>%
-  select(date, position, orientation, depth, fauna, root,
-         microclimate_index_1, microclimate_index_2)%>% 
-  mutate(depth = as.factor(depth))
-
-# Function to generate rolling windows for a given dataset:
-create_rolling_windows <- function(df, window_days, step_days) {
-  start_dates <- seq(
-    min(df$date),
-    max(df$date) - days(window_days) + hours(6),
-    by = paste(step_days, "days")
-  )
-  
-  # Subset data for each window
-  windows <- map(start_dates, function(start_dt) {
-    df %>% filter(date >= start_dt & date < start_dt + days(window_days))
-  })
-  
-  # Name each window by its start date
-  names(windows) <- format(start_dates, "%Y-%m-%d")
-  windows
-}
-
-# Build rolling windows separately for each position:
-windows_list <- data_sem %>%
-  group_by(position) %>%
-  group_map(~ create_rolling_windows(.x, window_days, step_days), .keep = TRUE)
-names(windows_list) <- unique(data_sem$position)
-```
-
-#### Verification of model fit
+#### Verification of global model fit
 
 ```{r}
 model_root_A <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data_sem%>% filter(position=="A") %>% drop_na(), 
+        data = data_sem %>% filter(position=="A") %>% drop_na(), 
         random = ~1 | orientation/depth,
         correlation = corAR1(form = ~1 | orientation/depth))
 model_fauna_A <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
@@ -240,201 +194,7 @@ cat("performance model *fauna ~ microclimate_index_1 + microclimate_index_2* + r
 check_model(model_fauna_C)
 ```
 
-#### SEM application
-
-```{r}
-# Define window size (in days) and allowed missing-data rate
-window_days <- 14       
-step_days   <- 1      
-missing_data_rate <- 0.3
-
-
-data_sem <- data_sem_raw %>% 
-  rename(
-    microclimate_index_1 = microclimate_index[1],
-    microclimate_index_2 = microclimate_index[2]
-  ) %>%
-  select(date, position, orientation, depth, fauna, root,
-         microclimate_index_1, microclimate_index_2)%>% 
-  mutate(depth = as.factor(depth))
-
-# Function defining the SEM structure 
-sem_fit <- function(data) {
-  psem(
-    lme(root ~ microclimate_index_1 + microclimate_index_2,
-        data = data, random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth)),
-    lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-        data = data, 
-        random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth)),
-    microclimate_index_1 %~~% microclimate_index_2
-  )
-}
-
-# Storage for fitted models from all rolling windows
-results_list <- list()
-
-# Loop over each position and each time window
-for(pos in names(windows_list)) {
-  for(window_name in names(windows_list[[pos]])) {
-    
-    data_window <- windows_list[[pos]][[window_name]] %>%
-           drop_na()
-    
-    # Skip windows with insufficient data based on allowed missing rate
-    if(nrow(data_window)/(window_days*16) < missing_data_rate) next
-    
-    # Fit SEM (skip windows that fail to converge)
-    mod <- tryCatch(
-      sem_fit(data_window),
-      error = function(e) NULL
-    )
-    
-    # Store successful model fits
-    if(!is.null(mod)) {
-      results_list[[paste(pos, window_name, sep = "_")]] <- list(
-        model = mod,
-        time_window_start = window_name,
-        position = pos
-      )
-    }
-  }
-}
-
-# Function to extract coefficients from a fitted SEM:
-extract_results <- function(model_name, model_info) {
-  sm <- summary(model_info$model)
-  coef_table <- as.data.frame(sm$coefficients)
-  
-  p_clean <- coef_table$P.Value %>%
-    as.character() %>%
-    stringr::str_replace("<", "") %>%
-    as.numeric()
-  
-  tibble::tibble(
-    model            = model_name,
-    time_window_start = model_info$time_window_start,
-    position         = model_info$position,
-    response         = coef_table$Response,
-    predictor        = coef_table$Predictor,
-    estimate         = coef_table$Estimate,
-    se               = coef_table$Std.Error,
-    df               = coef_table$DF,
-    t_value          = coef_table$t.value,
-    p_value          = p_clean
-  )
-}
-
-# Convert list of model outputs into a single tidy dataframe
-results_df <- map2_dfr(
-  names(results_list),
-  results_list,
-  extract_results
-)
-results_df <- results_df %>%
-  mutate(time_step = as.POSIXct(time_window_start,
-                                format = "%Y-%m-%d",
-                                tz = "UTC"))
-```
-
-##### SEM estimates distribution
-
-```{r}
-#| class: full-width
-#| dpi: 72
-microclimate_index_name  <- c("microclimate_index_1" = microclimate_index[1],
-                 "microclimate_index_2" = microclimate_index[2])
-
-g1 <- results_df %>%
-  filter(!str_detect(predictor, "~~") & response != "") %>%
-  mutate(se = as.numeric(se)) %>%
-  ggplot(aes(time_step, estimate, group = position, color = position, fill = position)) + 
-  geom_hline(yintercept = 0, color= "black") +
-  geom_ribbon(aes(ymin = estimate - se, ymax = estimate + se), alpha = 0.4, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = position_palette) +
-  scale_fill_manual(values = position_palette) +  
-  facet_grid(predictor ~ response,scales = "free_y", labeller = labeller(
-      response = as_labeller(function(x) paste0("Response: ", x)),
-      predictor = as_labeller(microclimate_index_name))) +
-  scale_x_date(date_labels = "%b %Y", date_breaks = "2 months") +
-  labs(x = "Date", y = "Estimate", title = "Estimates from SEM regression according to time steps and land use") +
-  theme_minimal(base_size = 10) +
-  theme(panel.grid.minor = element_blank(),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold", size = 10),
-        panel.border = element_rect(linewidth =  1))
-
-invisible(tiff("../output/Estimates_SEM_regression_distribution.tiff", width = 3000, height = 2000, res = 300))
-g1
-invisible(dev.off())
-g1
-```
-
-##### SEM smoothed estimates distribution
-
-```{r}
-# estimates regression
-compute_loess <- function(df) {
-  fit <- try(
-    loess(estimate ~ as.numeric(time_step), data = df, span = 0.5),
-    silent = TRUE
-  )
-
-df$loess_pred <- predict(fit, newdata = data.frame(time_step = df$time_step))
-  df
-}
-
-results_smooth <- results_df %>%
-  filter(!str_detect(predictor, "~~") & response != "") %>%
-  group_by(position, predictor, response) %>%
-  arrange(time_step, .by_group = TRUE) %>%
-  group_modify(~ compute_loess(.x)) %>%
-  ungroup()
-```
-
-```{r}
-#| class: full-width
-#| dpi: 72
-g2 <- ggplot(results_smooth,
-       aes(x = time_step, y = loess_pred,
-           group = position, color = position, fill = position)) +
-
-  geom_hline(yintercept = 0, color = "black") +
-  geom_ribbon(aes(ymin = 0, ymax = loess_pred), alpha = 0.8, color = NA) +
-  geom_line(linewidth = 1) +
-
-  scale_color_manual(values = position_palette) +
-  scale_fill_manual(values = position_palette) +
-  facet_grid(
-    predictor ~ response,
-    #scales = "free_y",
-    labeller = labeller(
-      response = as_labeller(function(x) paste0("Response: ", x)),
-      predictor = as_labeller(microclimate_index_name)
-    )
-  ) +
-  scale_x_date(date_labels = "%b %Y", date_breaks = "2 months") +
-  labs(x = "Date", y = "Smoothed estimates (loess)",
-       title = "Smoothed estimates from SEM regression according to time steps and land use") +
-  theme_minimal(base_size = 10) +
-  theme(panel.grid.minor = element_blank(),
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "bottom",
-        strip.text = element_text(face = "bold", size = 10),
-        panel.border = element_rect(linewidth =  1))
-
-
-invisible(tiff("../output/Smoothed_estimates_SEM_regression_distribution.tiff", width = 3000, height = 2000, res = 300))
-g2
-invisible(dev.off())
-g2
-```
-
-#### SEM application by taxa
-
+#### SEM application according to taxa list
 
 ```{r}
 # Function to generate rolling windows for a given dataset:
@@ -458,9 +218,9 @@ create_rolling_windows <- function(df, window_days, step_days) {
 run_sem_for_taxon <- function(taxon_var,
                               data_indices,
                               microclimate_index,
-                              window_days = 14,
-                              step_days   = 1,
-                              missing_data_rate = 0.3) {
+                              window_days = window_days,
+                              step_days   = step_days,
+                              missing_data_rate = missing_data_rate) {
 
   message("Running SEM for taxon: ", taxon_var)
 
@@ -568,6 +328,10 @@ run_sem_for_taxon <- function(taxon_var,
 ```
 
 ```{r}
+window_days <- 14       
+step_days   <- 1      
+missing_data_rate <- 0.3
+
 results_all_taxa <- purrr::map_dfr(
   fauna_vars,
   run_sem_for_taxon,
