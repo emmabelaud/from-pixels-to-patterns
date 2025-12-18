@@ -1,0 +1,176 @@
+---
+title: "Check models performance"
+format: html
+editor: visual
+---
+
+In order to apply SEM analysis, we must make severals choices. The attached script present the analysis and associated results which help us to take the necessary decisions.
+
+## Load package and data
+```{r}
+invisible(Sys.setlocale("LC_TIME", "C"))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "lme4", "slider", "purrr", "MuMIn"),require,character.only = TRUE))
+
+
+# Fauna data
+data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
+  mutate("hum" = hum_soil,
+         "temp" = temp_soil,
+         "root" = root_growth_cm2_count,
+         "fauna" = all_taxa,
+         position=as.factor(position))
+data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
+
+# taxa list 
+fauna_vars <- readLines("../output/fauna_vars.txt")
+
+# microclimate index 
+microclimate_index <- readLines("../output/microclimate_index.txt")
+```
+
+
+## Check SEM
+```{r}
+# Générer et stocker les modèles
+window_days <- 20       
+step_days   <- 1      
+missing_data_rate <- 0.5
+# run_sem_for_taxon doit retourner la liste de modèles en plus du tibble résumé
+run_sem_for_taxon_full <- function(taxon_var,
+                                   data_indices,
+                                   microclimate_index,
+                                   window_days = window_days,
+                                   step_days   = step_days,
+                                   missing_data_rate = missing_data_rate) {
+  
+  message("Running SEM for taxon: ", taxon_var)
+  
+  data_sem <- data_indices %>%
+    mutate(
+      fauna = !!sym(taxon_var),
+      microclimate_index_1 = !!sym(microclimate_index[1]),
+      microclimate_index_2 = !!sym(microclimate_index[2])
+    ) %>%
+    select(date, position, orientation, depth,
+           fauna, root,
+           microclimate_index_1, microclimate_index_2) %>%
+    mutate(depth = as.factor(depth))
+  
+  # Rolling windows par position
+  windows_list <- data_sem %>%
+    group_by(position) %>%
+    group_map(~ create_rolling_windows(.x, window_days, step_days),
+              .keep = TRUE)
+  
+  names(windows_list) <- unique(data_sem$position)
+  
+  sem_fit <- function(data) {
+    psem(
+      lme(root ~ microclimate_index_1 + microclimate_index_2,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+      
+      lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+      
+      microclimate_index_1 %~~% microclimate_index_2
+    )
+  }
+  
+  results_list <- list()
+  
+  for (pos in names(windows_list)) {
+    for (window_name in names(windows_list[[pos]])) {
+      data_window <- windows_list[[pos]][[window_name]] %>% drop_na()
+      if (nrow(data_window) / (window_days * 16) < missing_data_rate) next
+      
+      mod <- tryCatch(sem_fit(data_window), error = function(e) NULL)
+      
+      if (!is.null(mod)) {
+        results_list[[paste(taxon_var, pos, window_name, sep = "_")]] <- list(
+          model = mod,
+          time_window_start = window_name,
+          position = pos,
+          taxon = taxon_var
+        )
+      }
+    }
+  }
+  
+  # Générer un tibble résumé des coefficients
+  extract_results <- function(model_name, model_info) {
+    sm <- summary(model_info$model)
+    coef_table <- as.data.frame(sm$coefficients)
+    
+    p_clean <- coef_table$P.Value %>%
+      as.character() %>%
+      stringr::str_replace("<", "") %>%
+      as.numeric()
+    
+    tibble(
+      model_name = model_name,
+      taxon      = model_info$taxon,
+      position   = model_info$position,
+      time_window_start = model_info$time_window_start,
+      response   = coef_table$Response,
+      predictor  = coef_table$Predictor,
+      estimate   = coef_table$Estimate,
+      se         = coef_table$Std.Error,
+      df         = coef_table$DF,
+      t_value    = coef_table$t.value,
+      p_value    = p_clean
+    )
+  }
+  
+  summary_tbl <- map2_dfr(names(results_list), results_list, extract_results)
+  
+  list(
+    summary = summary_tbl,
+    models  = results_list
+  )
+}
+
+
+# Générer tous les modèles pour tous les taxa
+
+results_all <- purrr::map(fauna_vars, ~ run_sem_for_taxon_full(
+  taxon_var = .x,
+  data_indices = data_sem_raw,
+  microclimate_index = microclimate_index,
+  window_days = window_days,
+  step_days = step_days,
+  missing_data_rate = missing_data_rate
+))
+
+# Rassembler les tibbles résumés et les modèles
+summary_all <- map_dfr(results_all, "summary")
+# Rassembler tous les modèles dans une seule liste
+models_all <- results_all %>%
+  map("models") %>%     # liste de listes
+  unlist(recursive = FALSE)  # transformer en une seule liste plate
+
+
+# Sélection aléatoire d'un modèle par taxon × position
+random_model_names <- summary_all %>%
+  distinct(taxon, position, model_name) %>%
+  group_by(taxon, position) %>%
+  slice_sample(n = 1) %>%
+  pull(model_name)
+
+selected_models <- models_all[random_model_names]
+
+
+# Évaluation des modèles sélectionnés
+all_performance_checks <- map(selected_models, function(psem_obj) {
+  lme_models <- purrr::keep(psem_obj$model, ~ inherits(.x, "lme"))
+  map(lme_models, ~ performance::check_model(.x))
+})
+
+all_performance_checks[[6]][[2]]
+
+
+```
+
