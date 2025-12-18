@@ -19,7 +19,7 @@ invisible(Sys.setlocale("LC_TIME", "C"))
 if (!dir.exists("../output")) {
   dir.create("../output")
 }
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "dsem", "kableExtra", "phylopath", "e1071", "nlme", "zoo", "jsonlite"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "kableExtra", "phylopath", "e1071", "nlme", "zoo"),require,character.only = TRUE))
 
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
