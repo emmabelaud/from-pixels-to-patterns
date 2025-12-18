@@ -24,7 +24,7 @@ invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performanc
 position_palette <- c("A" = "#385438", "B" = "#609060", "C" = "#a8c090")
 season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
 
-# Données faune
+# Fauna data
 data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
   mutate("hum" = hum_soil,
          "temp" = temp_soil,
@@ -32,6 +32,16 @@ data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c
          "fauna" = all_taxa,
          position=as.factor(position))
 data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
+
+# taxa list 
+fauna_vars <- readLines("../output/fauna_vars.txt")
+
+# microclimate index 
+microclimate_index <- readLines("../output/microclimate_index.txt")
+```
+
+```{r}
+
 ```
 
 ## Effect of land use on soil conditions
@@ -165,7 +175,7 @@ step_days   <- 1
 missing_data_rate <- 0.3
 
 
-data_sem <- data_sem_indices %>% 
+data_sem <- data_sem_raw %>% 
   rename(
     microclimate_index_1 = microclimate_index[1],
     microclimate_index_2 = microclimate_index[2]
@@ -233,6 +243,21 @@ check_model(model_fauna_C)
 #### SEM application
 
 ```{r}
+# Define window size (in days) and allowed missing-data rate
+window_days <- 14       
+step_days   <- 1      
+missing_data_rate <- 0.3
+
+
+data_sem <- data_sem_raw %>% 
+  rename(
+    microclimate_index_1 = microclimate_index[1],
+    microclimate_index_2 = microclimate_index[2]
+  ) %>%
+  select(date, position, orientation, depth, fauna, root,
+         microclimate_index_1, microclimate_index_2)%>% 
+  mutate(depth = as.factor(depth))
+
 # Function defining the SEM structure 
 sem_fit <- function(data) {
   psem(
@@ -410,76 +435,26 @@ g2
 
 #### SEM application by taxa
 
-select taxa list
 
 ```{r}
-#json hierarchy file
-taxo <- fromJSON("/home/Shared/hierarchy.json")
-
-# keep only non-empty nodes
-taxo_filtered <- taxo[sapply(taxo, function(x) length(x) > 0)]
-
-# recursive function to get all descendants
-get_descendants <- function(node, tree) {
-  children <- tree[[node]]
-  if (is.null(children) || length(children) == 0) return(character(0))
+# Function to generate rolling windows for a given dataset:
+create_rolling_windows <- function(df, window_days, step_days) {
+  start_dates <- seq(
+    min(df$date),
+    max(df$date) - days(window_days) + hours(6),
+    by = paste(step_days, "days")
+  )
   
-  all_desc <- unlist(lapply(children, get_descendants, tree = tree), use.names = FALSE)
-  unique(c(children, all_desc))
+  # Subset data for each window
+  windows <- map(start_dates, function(start_dt) {
+    df %>% filter(date >= start_dt & date < start_dt + days(window_days))
+  })
+  
+  # Name each window by its start date
+  names(windows) <- format(start_dates, "%Y-%m-%d")
+  windows
 }
 
-# get all descendants of "fauna"
-all_fauna <- get_descendants("fauna", taxo_filtered)
-
-# identify terminal taxa
-leaves <- all_fauna[!sapply(all_fauna, function(x) !is.null(taxo_filtered[[x]]) && length(taxo_filtered[[x]]) > 0)]
-
-# remove a few exceptional leaves manually
-leaves <- leaves[!leaves %in% c("multi_taxa", "unknown", "egg", "pauropoda_symphyla")]
-
-# promote specific subgroups to higher taxonomic levels
-rename_map <- c("bdelloidea" = "trombidiformes",
-                "uropodina" = "mesostigmata",
-                "julida" = "diplopoda",
-                "polydesmida" = "diplopoda",
-                "polyxenida" = "diplopoda",
-                "geophilomorpha" ="chilopoda",
-                "lithobiomorpha" = "chilopoda")
-
-leaves_updated <- setdiff(leaves, names(rename_map))  # remove promoted children
-leaves_updated <- c(leaves_updated, rename_map)       # add the promoted parent taxa
-
-# keep only selected leaves and classes with >= 20 observations
-df_raw <- read.csv("../data/fauna_data.csv", sep = ",", na.strings = c("", "NA"))
-taxa_list <- df_raw %>%
-  filter(!is.na(Predicted.class))%>%
-  mutate(
-    position = substr(scanner, 4, 4),  # A, B, ou C
-    depth = substr(scanner, 5, 6),      # 20 ou 50
-    orientation = substr(scanner, 8, 8),     # O ou E
-    date = ymd_hms(date),
-    date = if_else(minute(date) == 1, date - minutes(1), date),
-    hour = hour(date),
-    minute = minute(date))%>%
-  filter(date> "2024-03-01 00:00:00")%>%
-  filter(minute == 0, hour %in% c(0, 6, 12, 18))%>%
-  mutate(Predicted.class = ifelse(Predicted.class %in% names(rename_map),
-                                  rename_map[Predicted.class],
-                                  Predicted.class)) %>%
-  filter(Predicted.class %in% leaves_updated) %>%
-  group_by(Predicted.class) %>%
-  mutate(n_taxon = n()) %>%
-  ungroup() %>%
-  mutate(prop_taxon = n_taxon / n()) %>%
-  filter(prop_taxon >= 0.1)
-
-# select remaining taxa
-fauna_vars <- intersect(
-  unique(taxa_list$Predicted.class),
-  names(data_sem_indices))
-```
-
-```{r}
 run_sem_for_taxon <- function(taxon_var,
                               data_indices,
                               microclimate_index,
@@ -590,20 +565,17 @@ run_sem_for_taxon <- function(taxon_var,
                                   format = "%Y-%m-%d",
                                   tz = "UTC"))
 }
-
 ```
 
 ```{r}
 results_all_taxa <- purrr::map_dfr(
   fauna_vars,
   run_sem_for_taxon,
-  data_indices = data_sem_indices,
+  data_indices = data_sem_raw,
   microclimate_index = microclimate_index,
   window_days = window_days,
   step_days   = step_days,
-  missing_data_rate = missing_data_rate
-)
-
+  missing_data_rate = missing_data_rate)
 ```
 
 hypothesis about the global environmental force according system considered
@@ -660,9 +632,8 @@ g_sig_prop <- results_all_taxa %>%
   summarise(
     prop_significant = mean(significant, na.rm = TRUE),
     n_windows = n(),
-    .groups = "drop")ggplot(
-  sig_prop,
-  aes(x = relation, y = prop_significant, fill = position)) +
+    .groups = "drop")%>%
+  ggplot(aes(x = relation, y = prop_significant, fill = position)) +
   geom_col(position = position_dodge(width = 0.8)) +
   scale_fill_manual(values = position_palette) +
   facet_wrap(~ taxon, scales = "free_x") +
@@ -680,5 +651,49 @@ g_sig_prop <- results_all_taxa %>%
 
 g_sig_prop
 
+
+```
+
+```{r}
+alpha_level <- 0.05
+
+g_estimates_time <- results_all_taxa %>%
+  filter(response == "fauna",
+    !str_detect(predictor, "~~")) %>%
+  mutate(significant = p_value < alpha_level,
+    alpha_sig = ifelse(significant, 1, 0.2))%>%
+  ggplot(aes(x = time_step,y = estimate, color = position,alpha = alpha_sig)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
+  geom_point(size = 1.5) +
+
+  scale_color_manual(values = position_palette) +
+  scale_alpha_identity() +
+  facet_grid(
+    position + predictor ~ taxon,
+    scales = "free",
+    labeller = labeller(
+      predictor = label_wrap_gen(20),
+      taxon = label_wrap_gen(15))) +
+  scale_x_datetime(
+    date_labels = "%b %Y",
+    date_breaks = "1 month"
+  ) +
+
+  labs(
+    x = "Date",
+    y = "SEM estimate",
+    color = "Position",
+    title = "Temporal variation of SEM estimates (fauna response)",
+    subtitle = "Point opacity indicates statistical significance (p < 0.05)"
+  ) +
+
+  theme_minimal(base_size = 9) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 8),
+    legend.position = "bottom")
+
+g_estimates_time
 
 ```
