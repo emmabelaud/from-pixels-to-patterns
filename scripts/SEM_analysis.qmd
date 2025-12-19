@@ -40,7 +40,6 @@ fauna_vars <- readLines("../output/fauna_vars.txt")
 microclimate_index <- readLines("../output/microclimate_index.txt")
 ```
 
-
 ## Effect of land use on soil conditions
 
 ### Conditions according to land use

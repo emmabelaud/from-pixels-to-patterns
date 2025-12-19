@@ -7,9 +7,10 @@ editor: visual
 In order to apply SEM analysis, we must make severals choices. The attached script present the analysis and associated results which help us to take the necessary decisions.
 
 ## Load package and data
+
 ```{r}
 invisible(Sys.setlocale("LC_TIME", "C"))
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "lme4", "slider", "purrr", "MuMIn"),require,character.only = TRUE))
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "lme4", "slider", "purrr", "MuMIn", "nlme"),require,character.only = TRUE))
 
 
 # Fauna data
@@ -26,151 +27,268 @@ fauna_vars <- readLines("../output/fauna_vars.txt")
 
 # microclimate index 
 microclimate_index <- readLines("../output/microclimate_index.txt")
+
+set.seed(123)
 ```
 
-
 ## Check SEM
+
 ```{r}
-# Générer et stocker les modèles
-window_days <- 20       
-step_days   <- 1      
-missing_data_rate <- 0.5
-# run_sem_for_taxon doit retourner la liste de modèles en plus du tibble résumé
-run_sem_for_taxon_full <- function(taxon_var,
-                                   data_indices,
-                                   microclimate_index,
-                                   window_days = window_days,
-                                   step_days   = step_days,
-                                   missing_data_rate = missing_data_rate) {
+# Configuration parameters
+window_days <- 30
+step_days <- 1
+missing_data_rate <- 0.3
+n_windows_per_position <- 2  # Number of rolling windows randomly sampled per position
+
+# --------------------------------------------------
+# Function to create rolling time windows for a dataset
+# --------------------------------------------------
+create_rolling_windows <- function(df, window_days, step_days) {
+  start_dates <- seq(
+    min(df$date),
+    max(df$date) - days(window_days) + hours(6),
+    by = paste(step_days, "days")
+  )
+  
+  windows <- map(start_dates, function(start_dt) {
+    df %>% filter(date >= start_dt & date < start_dt + days(window_days))
+  })
+  
+  names(windows) <- format(start_dates, "%Y-%m-%d")
+  return(windows)
+}
+
+# --------------------------------------------------
+# Function to run SEM (Structural Equation Modeling) for a given taxon
+# --------------------------------------------------
+run_sem_for_taxon <- function(taxon_var,
+                              data_raw,
+                              microclimate_indices,
+                              window_days,
+                              step_days,
+                              missing_data_rate,
+                              n_windows_per_position) {
   
   message("Running SEM for taxon: ", taxon_var)
   
-  data_sem <- data_indices %>%
+  # Prepare SEM data
+  sem_data <- data_raw %>%
     mutate(
       fauna = !!sym(taxon_var),
-      microclimate_index_1 = !!sym(microclimate_index[1]),
-      microclimate_index_2 = !!sym(microclimate_index[2])
+      microclimate_1 = !!sym(microclimate_indices[1]),
+      microclimate_2 = !!sym(microclimate_indices[2])
     ) %>%
     select(date, position, orientation, depth,
            fauna, root,
-           microclimate_index_1, microclimate_index_2) %>%
+           microclimate_1, microclimate_2) %>%
     mutate(depth = as.factor(depth))
   
-  # Rolling windows par position
-  windows_list <- data_sem %>%
-    group_by(position) %>%
-    group_map(~ create_rolling_windows(.x, window_days, step_days),
-              .keep = TRUE)
+  # Get unique positions
+  positions <- unique(sem_data$position)
+  selected_windows <- list()
   
-  names(windows_list) <- unique(data_sem$position)
-  
-  sem_fit <- function(data) {
-    psem(
-      lme(root ~ microclimate_index_1 + microclimate_index_2,
-          data = data,
-          random = ~1 | orientation/depth,
-          correlation = corAR1(form = ~1 | orientation/depth)),
-      
-      lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-          data = data,
-          random = ~1 | orientation/depth,
-          correlation = corAR1(form = ~1 | orientation/depth)),
-      
-      microclimate_index_1 %~~% microclimate_index_2
-    )
-  }
-  
-  results_list <- list()
-  
-  for (pos in names(windows_list)) {
-    for (window_name in names(windows_list[[pos]])) {
-      data_window <- windows_list[[pos]][[window_name]] %>% drop_na()
-      if (nrow(data_window) / (window_days * 16) < missing_data_rate) next
-      
-      mod <- tryCatch(sem_fit(data_window), error = function(e) NULL)
-      
-      if (!is.null(mod)) {
-        results_list[[paste(taxon_var, pos, window_name, sep = "_")]] <- list(
-          model = mod,
-          time_window_start = window_name,
-          position = pos,
-          taxon = taxon_var
-        )
-      }
+  # Loop through each position
+  for (pos in positions) {
+    df_pos <- sem_data %>% filter(position == pos)
+    
+    # Create all possible rolling windows
+    all_windows <- create_rolling_windows(df_pos, window_days, step_days)
+    
+    # Filter windows with enough non-missing data
+    valid_windows <- all_windows[map_lgl(all_windows, function(win) {
+      data_non_missing <- win %>% drop_na()
+      nrow(data_non_missing) / (window_days * 16) >= missing_data_rate
+    })]
+    
+    # Randomly sample windows if enough valid ones exist
+    if (length(valid_windows) >= n_windows_per_position) {
+      selected_indices <- sample(seq_along(valid_windows), size = n_windows_per_position)
+      final_windows <- valid_windows[selected_indices]
+    } else {
+      warning(paste("Position", pos, "has only", length(valid_windows), "valid windows."))
+      final_windows <- valid_windows
+    }
+    
+    # Store selected windows in a structured list
+    for (i in seq_along(final_windows)) {
+      window_name <- names(final_windows)[i]
+      selected_windows[[length(selected_windows) + 1]] <- list(
+        position = pos,
+        window_name = window_name,
+        data = final_windows[[i]] %>% drop_na()
+      )
     }
   }
   
-  # Générer un tibble résumé des coefficients
+  # Convert list of windows to tibble
+  windows_tbl <- map_dfr(selected_windows, ~ tibble(
+    position = .x$position,
+    window_name = .x$window_name,
+    data = list(.x$data)
+  ))
+  
+  # Define SEM structure
+  sem_model <- function(data) {
+    psem(
+      lme(root ~ microclimate_1 + microclimate_2,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+      
+      lme(fauna ~ microclimate_1 + microclimate_2 + root,
+          data = data,
+          random = ~1 | orientation/depth,
+          correlation = corAR1(form = ~1 | orientation/depth)),
+      
+      microclimate_1 %~~% microclimate_2
+    )
+  }
+  
+  # Fit SEM models and extract results
+  results_list <- list()
+  for (i in seq_len(nrow(windows_tbl))) {
+    data_window <- windows_tbl$data[[i]]
+    window_name <- windows_tbl$window_name[i]
+    pos <- windows_tbl$position[i]
+    
+    model_fit <- tryCatch(sem_model(data_window), error = function(e) NULL)
+    
+    if (!is.null(model_fit)) {
+      results_list[[paste(taxon_var, pos, window_name, sep = "_")]] <- list(
+        model = model_fit,
+        time_window_start = window_name,
+        position = pos,
+        taxon = taxon_var
+      )
+    }
+  }
+  
+  # Extract coefficients from SEM models
   extract_results <- function(model_name, model_info) {
     sm <- summary(model_info$model)
-    coef_table <- as.data.frame(sm$coefficients)
+    coef_tbl <- as.data.frame(sm$coefficients)
     
-    p_clean <- coef_table$P.Value %>%
+    p_values_clean <- coef_tbl$P.Value %>%
       as.character() %>%
-      stringr::str_replace("<", "") %>%
+      str_replace("<", "") %>%
       as.numeric()
     
     tibble(
       model_name = model_name,
-      taxon      = model_info$taxon,
-      position   = model_info$position,
+      taxon = model_info$taxon,
+      position = model_info$position,
       time_window_start = model_info$time_window_start,
-      response   = coef_table$Response,
-      predictor  = coef_table$Predictor,
-      estimate   = coef_table$Estimate,
-      se         = coef_table$Std.Error,
-      df         = coef_table$DF,
-      t_value    = coef_table$t.value,
-      p_value    = p_clean
+      response = coef_tbl$Response,
+      predictor = coef_tbl$Predictor,
+      estimate = coef_tbl$Estimate,
+      se = coef_tbl$Std.Error,
+      df = coef_tbl$DF,
+      t_value = coef_tbl$t.value,
+      p_value = p_values_clean
     )
   }
   
   summary_tbl <- map2_dfr(names(results_list), results_list, extract_results)
   
-  list(
+  return(list(
     summary = summary_tbl,
-    models  = results_list
-  )
+    models = results_list
+  ))
 }
 
+# --------------------------------------------------
+# Run SEM for all taxa
+# --------------------------------------------------
+results_all <- map(
+  fauna_vars,
+  ~ run_sem_for_taxon(
+    taxon_var = .x,
+    data_raw = data_sem_raw,
+    microclimate_indices = microclimate_index,
+    window_days = window_days,
+    step_days = step_days,
+    missing_data_rate = missing_data_rate,
+    n_windows_per_position = n_windows_per_position
+  )
+)
 
-# Générer tous les modèles pour tous les taxa
-
-results_all <- purrr::map(fauna_vars, ~ run_sem_for_taxon_full(
-  taxon_var = .x,
-  data_indices = data_sem_raw,
-  microclimate_index = microclimate_index,
-  window_days = window_days,
-  step_days = step_days,
-  missing_data_rate = missing_data_rate
-))
-
-# Rassembler les tibbles résumés et les modèles
+# Combine summaries
 summary_all <- map_dfr(results_all, "summary")
-# Rassembler tous les modèles dans une seule liste
+
+# Combine all models
 models_all <- results_all %>%
-  map("models") %>%     # liste de listes
-  unlist(recursive = FALSE)  # transformer en une seule liste plate
+  map("models") %>%
+  discard(is.null) %>%
+  unlist(recursive = FALSE)
 
-
-# Sélection aléatoire d'un modèle par taxon × position
-random_model_names <- summary_all %>%
-  distinct(taxon, position, model_name) %>%
-  group_by(taxon, position) %>%
-  slice_sample(n = 1) %>%
-  pull(model_name)
-
-selected_models <- models_all[random_model_names]
-
-
-# Évaluation des modèles sélectionnés
-all_performance_checks <- map(selected_models, function(psem_obj) {
-  lme_models <- purrr::keep(psem_obj$model, ~ inherits(.x, "lme"))
-  map(lme_models, ~ performance::check_model(.x))
+# --------------------------------------------------
+# Perform diagnostics on all models
+# --------------------------------------------------
+# For each SEM model in `models_all`, we check residual normality,
+# homoscedasticity, and calculate marginal and conditional R² for LME components.
+diagnostics_all <- map_dfr(names(models_all), function(mod_name) {
+  
+  # Extract the current pSEM object
+  current_psem <- models_all[[mod_name]]$model
+  
+  # Keep only the lme models inside the pSEM object
+  lme_models <- keep(current_psem, ~ inherits(.x, "lme"))
+  
+  # Loop over each LME model in the pSEM
+  map2_dfr(names(lme_models), lme_models, function(resp_name, mod) {
+    
+    # 1. Normalized residuals
+    #    We use normalized residuals to check for approximate normality
+    res <- residuals(mod, type = "normalized")
+    
+    # 2. Shapiro-Wilk test for residual normality
+    #    Null hypothesis: residuals are normally distributed
+    norm_test <- shapiro.test(res)
+    
+    # 3. Homoscedasticity test
+    #    Use Spearman correlation between absolute residuals and fitted values
+    #    Null hypothesis: no correlation => constant variance (homoscedasticity)
+    fitted_vals <- fitted(mod)
+    homo_test <- cor.test(abs(res), fitted_vals, method = "spearman", exact = FALSE)
+    
+    # 4. Calculate R²
+    #    Marginal R²: proportion of variance explained by fixed effects
+    #    Conditional R²: proportion of variance explained by fixed + random effects
+    r2_vals <- tryCatch(
+      r2(mod),
+      error = function(e) list(R2_marginal = NA, R2_conditional = NA)
+    )
+    
+    # 5. Compile diagnostics into a tibble
+    tibble(
+      model_id     = mod_name,              # Identifier for the SEM model
+      response     = resp_name,             # Response variable for this LME
+      p_normality  = norm_test$p.value,     # p-value from Shapiro-Wilk test
+      p_homo       = homo_test$p.value,     # p-value from homoscedasticity test
+      r2_marginal  = r2_vals$R2_marginal,  # Marginal R²
+      r2_cond      = r2_vals$R2_conditional # Conditional R²
+    )
+  })
 })
 
-all_performance_checks[[6]][[2]]
+# --------------------------------------------------
+# Summarize model validity
+# --------------------------------------------------
+# We consider a model "ok" if residuals are approximately normal (p > 0.05)
+# and homoscedastic (p > 0.05)
+diagnostic_summary <- diagnostics_all %>%
+  mutate(is_ok = p_normality > 0.05 & p_homo > 0.05)
+
+# Print summary table
+# Columns:
+# - model_id: SEM model identifier
+# - response: response variable
+# - p_normality: Shapiro-Wilk p-value
+# - p_homo: homoscedasticity test p-value
+# - r2_marginal: marginal R²
+# - r2_cond: conditional R²
+# - is_ok: TRUE if both normality and homoscedasticity pass
+print(diagnostic_summary)
 
 
 ```
-
