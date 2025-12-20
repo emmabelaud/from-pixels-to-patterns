@@ -10,14 +10,13 @@ In order to apply SEM analysis, we must make severals choices. The attached scri
 
 ```{r}
 invisible(Sys.setlocale("LC_TIME", "C"))
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "lme4", "slider", "purrr", "MuMIn", "nlme"),require,character.only = TRUE))
-
+invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "lme4", "slider", "purrr", "MuMIn", "nlme", "moments"),require,character.only = TRUE))
 
 # Fauna data
 data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
   mutate("hum" = hum_soil,
          "temp" = temp_soil,
-         "root" = root_growth_cm2_count,
+         "root" = root_cm2_count,
          "fauna" = all_taxa,
          position=as.factor(position))
 data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
@@ -28,39 +27,119 @@ fauna_vars <- readLines("../output/fauna_vars.txt")
 # microclimate index 
 microclimate_index <- readLines("../output/microclimate_index.txt")
 
-set.seed(123)
+#set.seed(123)
+```
+
+Data transformation
+
+```{r}
+# to transfrom (sqrt) only positive values of fauna variables: data_sem_raw <- data_sem_raw %>% mutate(across(all_of(fauna_vars), ~ ifelse(. >= 0, sqrt(.), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
+
+# to transfrom (log) only positive values of fauna variables: 
+data_sem_raw <- data_sem_raw %>% mutate(across(all_of(c(fauna_vars, "root")), ~ ifelse(!is.na(.), log(.+0.1), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
+    
+# to scale all variables : data_sem_raw <- data_sem_raw %>% mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+
+```
+
+```{r}
+distrib <- data_sem_raw %>%
+  pivot_longer(
+    cols = all_of(c("root", fauna_vars, microclimate_index)),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~variable, scales = "free") +
+  theme_bw()
+distrib
 ```
 
 ## Check SEM
 
-```{r}
-# Configuration parameters
-window_days <- 30
-step_days <- 1
-missing_data_rate <- 0.3
-n_windows_per_position <- 2  # Number of rolling windows randomly sampled per position
+### Parameters configuration
 
-# --------------------------------------------------
-# Function to create rolling time windows for a dataset
-# --------------------------------------------------
+```{r}
+# window_days: length of each rolling time window (days)
+# step_days: temporal shift between consecutive windows (days)
+# missing_data_rate: minimum proportion of complete observations
+#                     required for a window to be retained
+# n_windows_per_position: number of rolling windows randomly
+#                          sampled per spatial position
+window_days <- 20
+step_days <- 1
+missing_data_rate <- 0.5
+n_windows_per_position <- 10
+```
+
+### Rolling time windows
+
+```{r}
+# This function generates overlapping time windows of fixed
+# duration, shifted by a constant time step.
 create_rolling_windows <- function(df, window_days, step_days) {
+
   start_dates <- seq(
     min(df$date),
     max(df$date) - days(window_days) + hours(6),
     by = paste(step_days, "days")
   )
-  
-  windows <- map(start_dates, function(start_dt) {
-    df %>% filter(date >= start_dt & date < start_dt + days(window_days))
-  })
-  
-  names(windows) <- format(start_dates, "%Y-%m-%d")
-  return(windows)
-}
 
-# --------------------------------------------------
-# Function to run SEM (Structural Equation Modeling) for a given taxon
-# --------------------------------------------------
+  windows <- map(
+    start_dates,
+    ~ df %>% filter(date >= .x & date < .x + days(window_days))
+  )
+
+  names(windows) <- format(start_dates, "%Y-%m-%d")
+  windows
+}
+```
+
+### SEM definition
+
+```{r}
+# This function defines the SEM structure applied to each
+# rolling window. The structure is fixed across all taxa,
+# positions, and time windows.
+#
+# Components:
+# - root biomass explained by microclimate
+# - fauna explained by microclimate and root
+# - random effects nested by orientation / depth
+# - AR(1) temporal autocorrelation
+fit_sem <- function(data) {
+
+  psem(
+    lme(
+      root ~ microclimate_1 + microclimate_2,
+      data = data,
+      random = ~ 1 | orientation / depth,
+      correlation = corAR1(form = ~ 1 | orientation / depth)
+    ),
+
+    lme(
+      fauna ~ microclimate_1 + microclimate_2 + root,
+      data = data,
+      random = ~ 1 | orientation / depth,
+      correlation = corAR1(form = ~ 1 | orientation / depth)
+    ),
+
+    microclimate_1 %~~% microclimate_2
+  )
+}
+```
+
+### Function to run SEM by taxa
+
+```{r}
+# For a given taxon, this function:
+# 1) prepares SEM-ready data,
+# 2) creates rolling time windows per position,
+# 3) filters windows based on data completeness,
+# 4) randomly SAMPLES windows,
+# 5) fits SEMs for each selected window,
+# 6) extracts model coefficients.
 run_sem_for_taxon <- function(taxon_var,
                               data_raw,
                               microclimate_indices,
@@ -195,13 +274,13 @@ run_sem_for_taxon <- function(taxon_var,
     models = results_list
   ))
 }
+```
 
-# --------------------------------------------------
-# Run SEM for all taxa
-# --------------------------------------------------
+### Run SEM
+
+```{r}
 results_all <- map(
-  fauna_vars,
-  ~ run_sem_for_taxon(
+  fauna_vars, ~ run_sem_for_taxon(
     taxon_var = .x,
     data_raw = data_sem_raw,
     microclimate_indices = microclimate_index,
@@ -211,84 +290,110 @@ results_all <- map(
     n_windows_per_position = n_windows_per_position
   )
 )
-
-# Combine summaries
+# combine coefficient tables
 summary_all <- map_dfr(results_all, "summary")
-
-# Combine all models
+# collect all fitted SEM models
 models_all <- results_all %>%
   map("models") %>%
-  discard(is.null) %>%
   unlist(recursive = FALSE)
 
-# --------------------------------------------------
-# Perform diagnostics on all models
-# --------------------------------------------------
-# For each SEM model in `models_all`, we check residual normality,
-# homoscedasticity, and calculate marginal and conditional R² for LME components.
+```
+
+### Model diagnostics
+
+```{r}
+# Diagnostics focus on magnitude of deviations rather
+# than hypothesis testing, to remain robust with
+# large sample sizes and many models.
+
 diagnostics_all <- map_dfr(names(models_all), function(mod_name) {
   
-  # Extract the current pSEM object
   current_psem <- models_all[[mod_name]]$model
+  lme_models <- keep(current_psem, inherits, "lme")
   
-  # Keep only the lme models inside the pSEM object
-  lme_models <- keep(current_psem, ~ inherits(.x, "lme"))
-  
-  # Loop over each LME model in the pSEM
-  map2_dfr(names(lme_models), lme_models, function(resp_name, mod) {
+  map_dfr(lme_models, function(mod) {
     
-    # 1. Normalized residuals
-    #    We use normalized residuals to check for approximate normality
     res <- residuals(mod, type = "normalized")
+    fit <- fitted(mod)
+    n_obs <- length(res)  # nombre d’observations incluses
     
-    # 2. Shapiro-Wilk test for residual normality
-    #    Null hypothesis: residuals are normally distributed
-    norm_test <- shapiro.test(res)
-    
-    # 3. Homoscedasticity test
-    #    Use Spearman correlation between absolute residuals and fitted values
-    #    Null hypothesis: no correlation => constant variance (homoscedasticity)
-    fitted_vals <- fitted(mod)
-    homo_test <- cor.test(abs(res), fitted_vals, method = "spearman", exact = FALSE)
-    
-    # 4. Calculate R²
-    #    Marginal R²: proportion of variance explained by fixed effects
-    #    Conditional R²: proportion of variance explained by fixed + random effects
-    r2_vals <- tryCatch(
-      r2(mod),
-      error = function(e) list(R2_marginal = NA, R2_conditional = NA)
-    )
-    
-    # 5. Compile diagnostics into a tibble
     tibble(
-      model_id     = mod_name,              # Identifier for the SEM model
-      response     = resp_name,             # Response variable for this LME
-      p_normality  = norm_test$p.value,     # p-value from Shapiro-Wilk test
-      p_homo       = homo_test$p.value,     # p-value from homoscedasticity test
-      r2_marginal  = r2_vals$R2_marginal,  # Marginal R²
-      r2_cond      = r2_vals$R2_conditional # Conditional R²
+      model_id = mod_name,
+      response = all.vars(formula(mod))[1],
+      
+      # Strength of heteroscedasticity
+      hetero_strength = cor(abs(res), fit,
+                            method = "spearman",
+                            use = "complete.obs"),
+      
+      # Deviation from normality
+      skewness = skewness(res, na.rm = TRUE),
+      kurtosis = kurtosis(res, na.rm = TRUE),
+      
+      # Classical tests (informational)
+      p_normality = shapiro.test(res)$p.value,
+      p_homo = cor.test(abs(res), fit,
+                        method = "spearman")$p.value,
+      
+      # Model fit
+      r2_marginal = tryCatch(r2(mod)$R2_marginal, error = function(e) NA),
+      r2_cond = tryCatch(r2(mod)$R2_conditional, error = function(e) NA),
+      
+      # Number of observations
+      n_obs = n_obs
     )
   })
 })
+```
 
-# --------------------------------------------------
-# Summarize model validity
-# --------------------------------------------------
-# We consider a model "ok" if residuals are approximately normal (p > 0.05)
-# and homoscedastic (p > 0.05)
+### Diagnostic summary
+
+```{r}
+# Evaluate SEM model residuals in terms of:
+# - heteroscedasticity (Spearman correlation of |residuals| vs fitted)
+# - normality (skewness and kurtosis of residuals)
+# - classical tests (Shapiro-Wilk, Spearman for info only)
+# Include number of observations to contextualize diagnostics
+# Define explicit thresholds for interpretation:
+hetero_threshold_low      <- 0.2  # |ρ| < 0.2 → low heteroscedasticity
+hetero_threshold_moderate <- 0.4  # 0.2 ≤ |ρ| < 0.4 → moderate
+skewness_threshold        <- 1    # |skewness| < 1 → acceptable
+kurtosis_min              <- 2    # kurtosis > 2
+kurtosis_max              <- 6    # kurtosis < 6
+
+
 diagnostic_summary <- diagnostics_all %>%
-  mutate(is_ok = p_normality > 0.05 & p_homo > 0.05)
+  mutate(
 
-# Print summary table
-# Columns:
-# - model_id: SEM model identifier
-# - response: response variable
-# - p_normality: Shapiro-Wilk p-value
-# - p_homo: homoscedasticity test p-value
-# - r2_marginal: marginal R²
-# - r2_cond: conditional R²
-# - is_ok: TRUE if both normality and homoscedasticity pass
-print(diagnostic_summary)
-
-
+    # Categorize heteroscedasticity magnitude
+    hetero_level = case_when(
+      abs(hetero_strength) < hetero_threshold_low      ~ "low",
+      abs(hetero_strength) < hetero_threshold_moderate ~ "moderate",
+      TRUE                                             ~ "strong"
+    ),
+    
+    # Evaluate normality based on skewness and kurtosis
+    normality_ok = (abs(skewness) < skewness_threshold) &
+                    (kurtosis > kurtosis_min & kurtosis < kurtosis_max),
+    
+    # Overall model validity
+    is_ok = (abs(hetero_strength) < hetero_threshold_moderate) &
+            (abs(skewness) < (skewness_threshold + 0.5))  # slightly more tolerant
+  ) %>%
+  # Select and order informative columns
+  select(
+    model_id,
+    response,
+    n_obs,          
+    hetero_strength,
+    hetero_level,
+    skewness,
+    kurtosis,
+    normality_ok,
+    p_normality,
+    p_homo,
+    r2_marginal,
+    r2_cond,
+    is_ok
+  )
 ```

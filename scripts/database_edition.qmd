@@ -11,6 +11,7 @@ editor: visual
 library(tidyverse)
 library(lubridate)
 library(ade4)
+library(jsonlite)
 library(zoo)
 ```
 
@@ -84,7 +85,7 @@ taxa_list <- df %>%
   mutate(n_taxon = n()) %>%
   ungroup() %>%
   mutate(prop_taxon = n_taxon / n()) %>%
-  filter(prop_taxon >= 0.1)
+  filter(prop_taxon >= 0.05)
 
 # select remaining taxa
 writeLines(unique(taxa_list$Predicted.class), con = "../output/fauna_vars.txt")
@@ -196,7 +197,7 @@ data_sem <- df_complete %>%
 We select the dates (time + day of capture) for which we have images from the eight scanners studied.
 
 ```{r}
-filter_data <- function(data, min_images = 6, apply_filter = TRUE) {
+filter_data <- function(data, min_images = 6, apply_filter = F) {
   
   data <- data %>%
     group_by(date) %>%
@@ -361,6 +362,7 @@ writeLines(microclimate_index, con = "../output/microclimate_index.txt")
 ## Roots data
 
 ```{r}
+#load and clean roots data
 dpi <- 1200 
 pixels_per_cm <- dpi / 2.54 
 root_density_raw <- read.csv("../data/root_pixels_count.csv") 
@@ -381,7 +383,9 @@ root_density<- root_density_raw %>%
          hour = hour(date),
          minute = minute(date)) %>%
   filter(minute == 0, hour %in% c(0, 6, 12, 18))
+```
 
+```{r}
 root_density <- root_density %>%
   arrange(depth, position, orientation, date) %>%  
   group_by(depth, position, orientation,) %>%
@@ -409,9 +413,14 @@ root_density <- root_density %>%
     TRUE ~ root_growth_cm2_count_24h
   ))
 
+na_root_density <- root_density%>%
+  summarise(across(where(is.numeric), ~ sum(is.na(.))))
+
 data_sem <- data_sem %>%   
   left_join(root_density %>% select(date, position, depth, orientation, root_cm2_count, root_growth_cm2_count, root_mature_cm2_count,root_growth_cm2_count_24h), by = c("date", "position", "depth", "orientation"))
 ```
+
+alternative plus souple : a construire!!
 
 ## Season variable
 
@@ -436,8 +445,7 @@ data_sem <- data_sem %>%
 ## Data standardisation
 
 ```{r}
-data_sem <- data_sem %>% 
-  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+#data_sem <- data_sem %>% mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
 ```
 
 ## CSV generation
