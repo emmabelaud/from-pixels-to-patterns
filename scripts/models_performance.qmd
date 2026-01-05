@@ -36,24 +36,43 @@ Data transformation
 # to transfrom (sqrt) only positive values of fauna variables: data_sem_raw <- data_sem_raw %>% mutate(across(all_of(fauna_vars), ~ ifelse(. >= 0, sqrt(.), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
 
 # to transfrom (log) only positive values of fauna variables: 
-data_sem_raw <- data_sem_raw %>% mutate(across(all_of(c(fauna_vars, "root")), ~ ifelse(!is.na(.), log(.+0.1), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
+data_sem_raw <- data_sem_raw %>% mutate(across(all_of(c(fauna_vars, "root")), ~ ifelse(!is.na(.), sqrt(.)+sqrt(.+1), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
     
 # to scale all variables : data_sem_raw <- data_sem_raw %>% mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
 
 ```
 
 ```{r}
-distrib <- data_sem_raw %>%
-  pivot_longer(
-    cols = all_of(c("root", fauna_vars, microclimate_index)),
-    names_to = "variable",
-    values_to = "value"
-  ) %>%
-  ggplot(aes(x = value)) +
-  geom_histogram(bins = 30) +
-  facet_wrap(~variable, scales = "free") +
-  theme_bw()
-distrib
+stats <- data_sem_raw %>%
+  pivot_longer(cols = all_of(c("root", fauna_vars, microclimate_index)),names_to = "variable",values_to = "value") %>%
+  group_by(position, variable) %>%
+  reframe(
+    mean = mean(value, na.rm = TRUE),
+    variance = var(value, na.rm = TRUE),
+    skewness = skewness(value, na.rm = TRUE),
+    kurtosis = kurtosis(value, na.rm = TRUE))
+
+variable_distribution <- data_sem_raw %>%
+  pivot_longer(cols = all_of(c("root", fauna_vars, microclimate_index)),names_to = "variable",values_to = "value") %>%
+  ggplot(aes(value, fill = position)) +
+  geom_vline(xintercept = 0, linewidth = 1, color = 'grey') +
+  geom_histogram(binwidth = 0.1) +
+  facet_grid(position ~ variable, scales = "free") +
+  scale_fill_manual(values = position_palette) +
+  guides(fill = "none") +
+  labs(y=NULL, x=NULL)+
+  theme_minimal() +
+  geom_text(data = stats,aes(x = Inf - 1, y = Inf,
+      label = sprintf("moy=%.2f\nvar=%.2f\nskew=%.2f\nkurt=%.2f", mean, variance, skewness, kurtosis)),
+    hjust = 1.1, vjust = 1.1, size = 3, color = "black",
+    inherit.aes = FALSE) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(angle = 0, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 10)),
+    strip.text.x = element_text(size=12, margin = margin(t = 10, r = 0, b = 10, l = 0)),
+    panel.spacing = unit(1.5, "lines"))
+variable_distribution
 ```
 
 ## Check SEM
@@ -67,9 +86,9 @@ distrib
 #                     required for a window to be retained
 # n_windows_per_position: number of rolling windows randomly
 #                          sampled per spatial position
-window_days <- 20
+window_days <- 14
 step_days <- 1
-missing_data_rate <- 0.5
+missing_data_rate <- 0.3
 n_windows_per_position <- 10
 ```
 
@@ -396,4 +415,10 @@ diagnostic_summary <- diagnostics_all %>%
     r2_cond,
     is_ok
   )
+
+diagnostic_summary %>%
+  count(is_ok) %>%
+  mutate(
+    proportion = n / sum(n))
+
 ```
