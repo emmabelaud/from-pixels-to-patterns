@@ -28,7 +28,7 @@ season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8AC
 data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA"))%>%
   mutate("hum" = hum_soil,
          "temp" = temp_soil,
-         "root" = root_growth_cm2_count,
+         "root" = root_cm2_count,
          "fauna" = all_taxa,
          position=as.factor(position))
 data_sem_raw$date <- ymd_hms(data_sem_raw$date, tz = "UTC")
@@ -38,162 +38,12 @@ fauna_vars <- readLines("../output/fauna_vars.txt")
 
 # microclimate index 
 microclimate_index <- readLines("../output/microclimate_index.txt")
+
+# transformation
+data_sem_raw <- data_sem_raw %>% mutate(across(all_of(c(fauna_vars, "root")), ~ ifelse(!is.na(.), sqrt(.)+sqrt(.+1), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
 ```
 
-## Effect of land use on soil conditions
-
-### Conditions according to land use
-
-```{r}
-#| class: full-width
-#| dpi: 72
-variable_labels  <- c(hum = "Soil \nhumidity",
-        temp = "Soil \ntemperature",
-        root = "Root \ndensity",
-        fauna = "Invertebrate \nabundance")
-position_label <- c(A = "Unmanaged \nsystem",
-        C = "Managed \nsystem")
-
-stats <- data_sem_raw %>%
-  dplyr::select(date, position, depth, orientation, fauna, root, hum, temp) %>%
-  pivot_longer(cols = c('fauna', 'root','hum', 'temp'), names_to = "variable_name") %>%
-  mutate(variable_name = factor(variable_name,
-                                levels = c("hum", "temp", "root", "fauna")))%>%
-  group_by(position, variable_name) %>%
-  reframe(
-    mean = mean(value, na.rm = TRUE),
-    variance = var(value, na.rm = TRUE),
-    skewness = skewness(value, na.rm = TRUE),
-    kurtosis = kurtosis(value, na.rm = TRUE)
-  )
-
-invisible(tiff("../output/variable_distribution.tiff", width = 3000, height = 1500, res = 300))
-variable_distribution_1 <- data_sem_raw %>%
-  dplyr::select(date, position, depth, orientation, fauna, root, hum, temp) %>%
-  pivot_longer(cols = c('hum', 'temp', 'root','fauna'), names_to = "variable_name") %>%
-  mutate(variable_name = factor(variable_name,
-                                levels = c("hum", "temp", "root", "fauna")))%>%
-  ggplot(aes(value, fill = position)) +
-  geom_vline(xintercept = 0, linewidth = 1, color = 'grey') +
-  geom_histogram(binwidth = 0.1) +
-  facet_grid(position ~ variable_name, scales = "free",  labeller = labeller(variable_name = variable_labels, position = position_label)) +
-  scale_fill_manual(values = position_palette) +
-  guides(fill = "none") +
-  labs(y=NULL, x=NULL)+
-  theme_minimal() +
-  geom_text(
-    data = stats,
-    aes(x = Inf - 1, y = Inf,
-      label = sprintf("moy=%.2f\nvar=%.2f\nskew=%.2f\nkurt=%.2f",
-                      mean, variance, skewness, kurtosis)),
-    hjust = 1.1, vjust = 1.1, size = 3, color = "black",
-    inherit.aes = FALSE) +
-  theme(
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
-    panel.grid.minor = element_blank(),
-    strip.text.y = element_text(angle = 0, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 10)),
-    strip.text.x = element_text(size=12, margin = margin(t = 10, r = 0, b = 10, l = 0)),
-    panel.spacing = unit(1.5, "lines"))
-variable_distribution_1
-invisible(dev.off())
-
-variable_distribution_1
-```
-
-### Conditions according to seasons
-
-```{r}
-#| class: full-width
-#| dpi: 72
-variable_labels  <- c(hum = "Soil humidity",
-        temp = "Soil temperature",
-        root = "Root density",
-        fauna = "Invertebrate abundance")
-season_levels <- c("winter", "spring", "summer", "autumn")
-
-stats <- data_sem_raw %>%
-  dplyr::select(date, season, depth, orientation, fauna, root, hum, temp) %>%
-  pivot_longer(cols = c('fauna', 'root','hum', 'temp'), names_to = "variable_name") %>%
-  mutate(variable_name = factor(variable_name,
-               levels = c("hum", "temp", "root", "fauna")),
-         season = factor(season, levels = season_levels)) %>%
-  group_by(season, variable_name) %>%
-  reframe(
-    mean = mean(value, na.rm = TRUE),
-    variance = var(value, na.rm = TRUE),
-    skewness = skewness(value, na.rm = TRUE),
-    kurtosis = kurtosis(value, na.rm = TRUE)
-  )
-
-invisible(tiff("../output/variable_distribution_across_season.tiff", width = 2800, height = 1600, res = 300))
-variable_distribution_2 <- data_sem_raw %>%
-  dplyr::select(date, season, depth, orientation, fauna, root, hum, temp) %>%
-  pivot_longer(cols = c('hum', 'temp', 'root','fauna'), names_to = "variable_name") %>%
-  mutate(variable_name = factor(variable_name,
-                   levels = c("hum", "temp", "root", "fauna")),
-        season = factor(season, levels = season_levels))%>%
-  ggplot(aes(value, fill = season)) +
-  geom_vline(xintercept = 0, linewidth = 1, color = 'grey') +
-  geom_histogram(binwidth = 0.1) +
-  facet_grid(season ~ variable_name, scales = "free",  labeller = labeller(variable_name = variable_labels)) +
-  scale_fill_manual(values = season_palette) +
-  guides(fill = "none") +
-  labs(y=NULL, x=NULL)+
-  theme_minimal() +
-  geom_text(
-    data = stats,
-    aes(x = Inf - 1, y = Inf,
-      label = sprintf("moy=%.2f\nvar=%.2f\nskew=%.2f\nkurt=%.2f",
-                      mean, variance, skewness, kurtosis)),
-    hjust = 1.1, vjust = 1.1, size = 2.5, color = "black",
-    inherit.aes = FALSE) +
-  theme(
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
-    panel.grid.minor = element_blank(),
-    strip.text.y = element_text(angle = 0, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 10)),
-    strip.text.x = element_text(size=12, margin = margin(t = 10, r = 0, b = 10, l = 0)),
-    panel.spacing.y = unit(0.5, "lines"),  
-  panel.spacing.x = unit(1.5, "lines"))
-variable_distribution_2
-invisible(dev.off())
-
-variable_distribution_2
-```
-
-## Effects of land use on the relationships between biotic and abiotic drivers
-
-#### Verification of global model fit
-
-```{r}
-model_root_A <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data_sem %>% filter(position=="A") %>% drop_na(), 
-        random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth))
-model_fauna_A <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-        data = data_sem%>% filter(position=="A") %>% drop_na(), 
-        random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth))
-
-model_root_C <- lme(root ~ microclimate_index_1 + microclimate_index_2, 
-        data = data_sem%>% filter(position=="C") %>% drop_na(), 
-        random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth))
-model_fauna_C <- lme(fauna ~ microclimate_index_1 + microclimate_index_2 + root,
-        data = data_sem%>% filter(position=="C") %>% drop_na(), 
-        random = ~1 | orientation/depth,
-        correlation = corAR1(form = ~1 | orientation/depth))
-
-cat("performance model *root ~ microclimate_index_1 + microclimate_index_2* for unmanaged system")
-check_model(model_root_A)
-cat("performance model *fauna ~ microclimate_index_1 + microclimate_index_2* + root for unmanaged system")
-check_model(model_fauna_A)
-cat("performance model *root ~ microclimate_index_1 + microclimate_index_2* for managed system")
-check_model(model_root_C)
-cat("performance model *fauna ~ microclimate_index_1 + microclimate_index_2* + root for managed system")
-check_model(model_fauna_C)
-```
-
-#### SEM application according to taxa list
+## SEM modelisation
 
 ```{r}
 # Function to generate rolling windows for a given dataset:
@@ -341,81 +191,100 @@ results_all_taxa <- purrr::map_dfr(
   missing_data_rate = missing_data_rate)
 ```
 
-hypothesis about the global environmental force according system considered
+## Graphics
+
+### hypothesis about the global environmental force according system considered
 
 ```{r}
-# Distribution of the SEM relationships significance
-g_sig_distrib <- results_all_taxa %>%
-  filter(response == "fauna") %>%
-  ggplot(aes(x = position, y = p_value, fill = position)) +
-  geom_jitter(alpha=0.1)+
-  geom_boxplot(alpha=0.5) +
-  scale_fill_manual(values = position_palette) +
-  labs(x = "SEM relationship",
-    y = "pvalue",
-    title = "Distribution of the SEM relationships significance "
-  ) +
-  facet_wrap(~taxon)+
-  theme_minimal(base_size = 10) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold")
+alpha_level <- 0.05
+
+data_plot <- results_all_taxa %>%
+  filter(response == "fauna",
+         !str_detect(predictor, "~~")) %>%
+  mutate(
+    significant = p_value < alpha_level,
+    alpha_sig = ifelse(significant, 1, 0.2)
   )
+```
 
-g_sig_distrib
+```{r}
+stats <- data_plot %>%
+   group_by(position, predictor) %>%
+   reframe(
+     mean = mean(estimate, na.rm = TRUE),
+     variance = var(estimate, na.rm = TRUE),
+     skewness = skewness(estimate, na.rm = TRUE),
+     kurtosis = kurtosis(estimate, na.rm = TRUE))
+ggplot(data_plot, aes(estimate, fill = position))+
+     geom_histogram(binwidth = 0.1)+
+     scale_fill_manual(values = position_palette) +
+     facet_grid(position ~ predictor, scale ="free")+
+     geom_text(data = stats,aes(x = Inf - 1, y = Inf,
+                                label = sprintf("moy=%.2f\nvar=%.2f\nskew=%.2f\nkurt=%.2f", mean, variance, skewness, kurtosis)),
+               hjust = 1.1, vjust = 1.1, size = 3, color = "black",
+               inherit.aes = FALSE) +
+     theme_minimal()
+```
 
-# Distribution of the SEM relationships significance
-g_est_distrib <- results_all_taxa %>%
-  filter(response == "fauna") %>%
-  ggplot(aes(x = position, y = estimate, fill = position)) +
-  geom_hline(yintercept = 0, color="#FAAA99")+
-  geom_boxplot(alpha=0.5, outliers = F) +
-  scale_fill_manual(values = position_palette) +
-  labs(x = "SEM relationship",
-    y = "pvalue",
-    title = "Distribution of the SEM relationships estimates "
-  ) +
-  facet_grid(taxon ~ predictor, scale="free")+
-  theme_minimal(base_size = 10) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold")
-  )
+```{r}
+plot_one_taxon <- function(df, taxon_name) {
+  ggplot(df, aes(
+    x = time_step,
+    y = estimate,
+    color = position,
+    alpha = alpha_sig
+  )) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.3) +
+    geom_point(size = 1.5) +
+    scale_color_manual(values = position_palette) +
+    scale_alpha_identity() +
+    facet_grid(
+      position + predictor ~ .,
+      scales = "free",
+      labeller = labeller(
+        predictor = label_wrap_gen(20)
+      )
+    ) +
+    scale_x_datetime(
+      date_labels = "%b %Y",
+      date_breaks = "1 month"
+    ) +
+    labs(
+      x = "Date",
+      y = "SEM estimate",
+      color = "Position",
+      title = paste("Temporal variation of SEM estimates –", taxon_name),
+      subtitle = "Point opacity indicates statistical significance (p < 0.05)"
+    ) +
+    theme_minimal(base_size = 9) +
+    theme(
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold", size = 8),
+      legend.position = "bottom"
+    )
+}
 
-g_est_distrib
 
-# dataframe construction
-g_sig_prop <- results_all_taxa %>%
-  filter(response == "fauna") %>%
-  mutate(significant = p_value < 0.05,
-    relation = paste(response, "~", predictor)) %>%
-  group_by(taxon, position, relation) %>%
-  summarise(
-    prop_significant = mean(significant, na.rm = TRUE),
-    n_windows = n(),
-    .groups = "drop")%>%
-  ggplot(aes(x = relation, y = prop_significant, fill = position)) +
-  geom_col(position = position_dodge(width = 0.8)) +
-  scale_fill_manual(values = position_palette) +
-  facet_wrap(~ taxon, scales = "free_x") +
-  labs(
-    x = "SEM relationship",
-    y = "Proportion of significant windows (p < 0.05)",
-    title = "Proportion of significant SEM relationships across taxa"
-  ) +
-  theme_minimal(base_size = 10) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold")
-  )
-
-g_sig_prop
-
+plots_by_taxon <- data_plot %>%
+  split(.$taxon) %>%
+  imap(~ plot_one_taxon(.x, .y))
 
 ```
+
+```{r}
+data_plot %>%
+  group_by(taxon, predictor, position)%>%
+  reframe(estimate = mean(estimate))%>%
+  ggplot(aes(estimate, taxon, group = position, fill = position))+
+  geom_vline(xintercept = 0, color = "orange", linewidth = 0.5)+
+  geom_bar(stat = "identity", position = position_dodge())+
+  facet_grid(~predictor) +
+  scale_fill_manual(values = position_palette)+
+  theme_minimal()
+```
+
+time variation
 
 ```{r}
 alpha_level <- 0.05
@@ -459,4 +328,17 @@ g_estimates_time <- results_all_taxa %>%
 
 g_estimates_time
 
+
+```
+
+```{r}
+data_plot %>% 
+  mutate(month = floor_date(time_step, "month"))%>%
+  group_by(predictor, position, month) %>% 
+  reframe(estimate = mean(estimate))%>%
+  ggplot(aes(month, estimate, fill = position))+
+  geom_bar(stat = "identity", position = position_dodge())+
+  scale_fill_manual(values = position_palette)+
+  facet_grid(~predictor)+
+  theme_minimal()
 ```
