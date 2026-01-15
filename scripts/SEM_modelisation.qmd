@@ -46,7 +46,6 @@ Model parameters
 window_days <- 14
 step_days <- 1
 missing_data_rate <- 0.3
-n_windows <- 2
 ```
 
 ## Utility Functions
@@ -172,17 +171,17 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
       
       return(list(stats = res_stats, diags = diag_stats))
     })
-  }) %>% flatten() %>% compact()
+  }) %>% purrr::list_flatten() %>% compact()
   
   # --- FORMAT OUTPUT ---
   # If n_windows is NULL, we just want the big dataframe for the database
   if (is.null(n_windows)) {
-    return(map_dfr(results_all, "stats"))
+    return(map_dfr(results_all, ~ .x$stats))
   } else {
     # If testing, return a list with both coefficients and diagnostics
     return(list(
-      summary = map_dfr(results_all, "stats"),
-      diagnostics = map_dfr(results_all, "diags")
+      summary = map_dfr(results_all, ~ .x$stats),
+      diagnostics = map_dfr(results_all, ~ .x$diags)
     ))
   }
 }
@@ -207,7 +206,7 @@ kurtosis_max              <- 6    # kurtosis < 6
 
 # For a FAST test:
 # Perform a check on 2 windows per position
-check_run <- run_sem_pipeline(fauna_vars[1], data_transformed, microclimate_index, n_windows = 2)
+check_run <- run_sem_pipeline(fauna_vars[1], data_transformed, microclimate_index, n_windows = 5)
 diagnostic_summary <- check_run$diagnostics %>%
   mutate(
     # Categorize heteroscedasticity magnitude
@@ -248,13 +247,14 @@ diagnostic_summary %>%
 ```
 
 ### final database
-```{r}
-sem_results_raw <- map_dfr(fauna_vars, ~ run_sem_pipeline(.x, data_transformed, microclimate_index, n_windows = NULL))
-```
 
 ```{r}
+# --- Observed Model Generation ---
+sem_results_raw <- map_dfr(fauna_vars, ~ run_sem_pipeline(.x, data_transformed, microclimate_index, n_windows = NULL))
+
+
 # --- Null Model Generation ---
-n_perm <- 5  # Number of iterations for the null distribution
+n_perm <- 15  # Number of iterations for the null distribution
 
 sem_results_null <- map_dfr(1:n_perm, function(i) {
   message(paste("Permutation iteration:", i))
@@ -265,65 +265,31 @@ sem_results_null <- map_dfr(1:n_perm, function(i) {
   
   # Run pipeline on shuffled data (usually on a sample to save time)
   # Returns a flat dataframe because n_windows is specified
-  run_sem_pipeline(fauna_vars[1], data_null, microclimate_index, n_windows = 5) %>%
+  run_sem_pipeline(fauna_vars[1], data_null, microclimate_index, n_windows = NULL) %>%
     mutate(iteration = i, type = "null")
 })
 
+# Average and sd compute
+sem_results_null <- sem_results_null %>%
+  group_by(taxon, position, time_window_start, n_obs, response, predictor, type) %>%
+  reframe(
+    n_iterations = max(iteration, na.rm = TRUE),
+    sd_estimate = sd(estimate, na.rm = TRUE),
+    sd_std_estimate = sd(std_estimate, na.rm = TRUE),
+    sd_p_value = sd(p_value, na.rm = TRUE),
+    sd_r2_cond = sd(r2_cond, na.rm = TRUE),
+    sd_r2_marginal = sd(r2_marginal, na.rm = TRUE),
+    estimate = mean(estimate, na.rm = TRUE),
+    std_estimate = mean(std_estimate, na.rm = TRUE),
+    p_value = mean(p_value, na.rm = TRUE),
+    r2_cond = mean(r2_cond, na.rm = TRUE),
+    r2_marginal = mean(r2_marginal, na.rm = TRUE))
+
 # --- Final Consolidation ---
-sem_results <- bind_rows(mutate(sem_results_raw, type = "observed"), sem_results_null) %>%
-  mutate(path_id = paste(predictor, "->", response),
+sem_results <- bind_rows(mutate(sem_results_raw, type = "observed"), sem_results_null) %>% mutate(path_id = paste(predictor, "->", response),
          day = as.Date(time_window_start)) %>%
-  filter(!str_detect(path_id, "~~")) # Clean up correlations if necessary
+  filter(!str_detect(path_id, "~~")) 
 ```
-
-## ??
-### Model diagnostics
-
-```{r}
-# Diagnostics focus on magnitude of deviations rather
-# than hypothesis testing, to remain robust with
-# large sample sizes and many models.
-
-diagnostics_all <- map_dfr(names(models_all), function(mod_name) {
-  
-  current_psem <- models_all[[mod_name]]$model
-  lme_models <- keep(current_psem, inherits, "lme")
-  
-  map_dfr(lme_models, function(mod) {
-    
-    res <- residuals(mod, type = "normalized")
-    fit <- fitted(mod)
-    n_obs <- length(res)  # nombre d’observations incluses
-    
-    tibble(
-      model_id = mod_name,
-      response = all.vars(formula(mod))[1],
-      
-      # Strength of heteroscedasticity
-      hetero_strength = cor(abs(res), fit,
-                            method = "spearman",
-                            use = "complete.obs"),
-      
-      # Deviation from normality
-      skewness = skewness(res, na.rm = TRUE),
-      kurtosis = kurtosis(res, na.rm = TRUE),
-      
-      # Classical tests (informational)
-      p_normality = shapiro.test(res)$p.value,
-      p_homo = cor.test(abs(res), fit,
-                        method = "spearman")$p.value,
-      
-      # Model fit
-      r2_marginal = tryCatch(r2(mod)$R2_marginal, error = function(e) NA),
-      r2_cond = tryCatch(r2(mod)$R2_conditional, error = function(e) NA),
-      
-      # Number of observations
-      n_obs = n_obs
-    )
-  })
-})
-```
-
 
 ## Season mapping
 
