@@ -35,7 +35,10 @@ Data transformation
 # to transfrom (sqrt) only positive values of fauna variables: data_sem_raw <- data_sem_raw %>% mutate(across(all_of(fauna_vars), ~ ifelse(. >= 0, sqrt(.), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
 
 # to transfrom (log) only positive values of fauna variables: 
-data_transformed <- data_sem_raw %>% mutate(across(all_of(c(fauna_vars, "root")), ~ ifelse(!is.na(.), sqrt(.)+sqrt(.+1), .)),  across(where(is.numeric), ~ as.numeric(scale(.))))
+data_transformed <- data_sem_raw %>% 
+  mutate(across(all_of(c(fauna_vars, "root")),
+                ~ ifelse(!is.na(.), sqrt(.)+sqrt(.+1), .)),
+         across(where(is.numeric), ~ as.numeric(scale(.))))
     
 # to scale all variables : data_sem_raw <- data_sem_raw %>% mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
 ```
