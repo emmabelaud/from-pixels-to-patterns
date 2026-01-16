@@ -22,7 +22,7 @@ data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c
          date = ymd_hms(date, tz = "UTC"))
 # taxa list 
 fauna_vars <- readLines("../output/fauna_vars.txt")
-
+fauna_vars <- c("all_taxa",fauna_vars)
 # microclimate index 
 microclimate_index <- readLines("../output/microclimate_index.txt")
 
@@ -206,7 +206,7 @@ kurtosis_max              <- 6    # kurtosis < 6
 
 # For a FAST test:
 # Perform a check on 2 windows per position
-check_run <- run_sem_pipeline(fauna_vars[1], data_transformed, microclimate_index, n_windows = 5)
+check_run <- run_sem_pipeline(fauna_vars[1], data_transformed, microclimate_index, n_windows = 30)
 diagnostic_summary <- check_run$diagnostics %>%
   mutate(
     # Categorize heteroscedasticity magnitude
@@ -254,14 +254,14 @@ sem_results_raw <- map_dfr(fauna_vars, ~ run_sem_pipeline(.x, data_transformed, 
 
 
 # --- Null Model Generation ---
-n_perm <- 15  # Number of iterations for the null distribution
+n_perm <- 30  # Number of iterations for the null distribution
 
 sem_results_null <- map_dfr(1:n_perm, function(i) {
   message(paste("Permutation iteration:", i))
   
   # Create shuffled dataset: break links between microclimate, roots, and fauna
   data_null <- data_transformed %>% 
-    mutate(across(all_of(c(fauna_vars, "root")), ~sample(.)))
+    mutate(across(all_of(c(fauna_vars, "root", microclimate_index)), ~sample(.)))
   
   # Run pipeline on shuffled data (usually on a sample to save time)
   # Returns a flat dataframe because n_windows is specified
