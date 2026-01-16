@@ -15,44 +15,175 @@ execute:
 ## Packages and data
 
 ```{r}
+## Setup
 invisible(Sys.setlocale("LC_TIME", "C"))
-if (!dir.exists("../output")) {
-  dir.create("../output")
-}
-invisible(lapply(c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance", "patchwork", "slider", "kableExtra", "phylopath", "e1071", "nlme", "zoo"),require,character.only = TRUE))
 
-position_palette <- c("A" = "#5C6F2B",  "C" = "#DE802B")
-season_palette <- c('autumn' = '#CA7842', "summer" = "#DDA853", 'winter' = '#8ACCD5', "spring" = "#A4B465" )
+dir.create("../output", showWarnings = FALSE)
 
-# Fauna data
-data_sem_results <- read.csv("../output/SEM_results_database.csv", sep = ",", na.strings = c("", "NA")) %>%
-  mutate(taxon = case_when(
-      taxon == "fauna" ~ "null model",
-      TRUE ~ taxon))
+libs <- c(
+  "tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance",
+  "patchwork", "slider", "kableExtra", "phylopath", "e1071",
+  "nlme", "zoo"
+)
+invisible(lapply(libs, require, character.only = TRUE))
 
-# taxa list 
+## External inputs
+microclimate_index <- readLines("../output/microclimate_index.txt")
 fauna_vars <- readLines("../output/fauna_vars.txt")
 
-# microclimate index 
-microclimate_index <- readLines("../output/microclimate_index.txt")
+## Paths & palettes
+path_levels <- tibble(
+  path_order = 1:5,
+  path_id = c(
+    paste0(microclimate_index[1], " -> root"),
+    paste0(microclimate_index[2], " -> root"),
+    paste0(microclimate_index[1], " -> fauna"),
+    paste0(microclimate_index[2], " -> fauna"),
+    "root -> fauna"
+  )
+)
+
+path_palette <- setNames(
+  c("#c2cab2", "#555d45", "#dea88b", "#d1855c", "#955f42"),
+  path_levels$path_id
+)
+
+response_palette <- c("root" = "#94a378", "fauna" = "#d1855c")
+
+## SEM results 
+data_sem_results <- read.csv(
+  "../output/SEM_results_database.csv",
+  na.strings = c("", "NA")
+) %>%
+  mutate(taxon = if_else(taxon == "fauna", "null model", taxon)) %>%
+  left_join(path_levels, by = "path_id")
+
 ```
 
-Graphical representation of estimates
+## Environmental forcing of soil fauna activity in managed vs. unmanaged systems
+
+![](images/DAG.png)
 
 ```{r}
-data_sem_results %>%
-  filter(response == "fauna")%>%
-ggplot(aes(x = day, y = std_estimate, group = position ,color = position)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "red", alpha = 0.5) +
-  geom_smooth(method = "loess", span = 0.4, se = FALSE, size = 1) +
-  facet_grid(path_id ~ taxon, scale = "free_y") +
-  scale_color_manual(values = position_palette)+
-  labs(title = "Seasons of Ecological Decoupling",
-    x = "Date", y = "Estimates") +
-  theme_minimal() +
-  theme(legend.position = "bottom", 
-        strip.text = element_text(size = 7, face = "bold"),
-        axis.text.x = element_text(angle = 45, hjust = 1))
+data_plot <- data_sem_results %>%
+  filter(type == "observed") %>%
+  mutate(predictor = case_when(
+  predictor == "microclimate_1" ~ microclimate_index[1],
+  predictor == "microclimate_2" ~ microclimate_index[2],
+  TRUE ~ predictor))%>%
+  mutate(path_id = str_replace(path_id, "microclimate_1", microclimate_index[1]),
+         path_id = str_replace(path_id, "microclimate_2", microclimate_index[2])) %>%
+  filter(std_estimate >= quantile(std_estimate, 0.25, na.rm = TRUE) - 1.5 * IQR(std_estimate, na.rm = TRUE),std_estimate <= quantile(std_estimate, 0.25, na.rm = TRUE) + 1.5 * IQR(std_estimate, na.rm = TRUE)) %>%
+  mutate(path_id = factor(path_id, levels = path_levels$path_id)) 
+
+## pvalue_summary
+pval_summary <- data_plot %>%
+  group_by(path_id, position) %>%
+  summarise(
+    n_total = n(),
+    n_sig = sum(p_value < 0.05, na.rm = TRUE),
+    prop_sig = (n_sig / n_total) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(label = paste0("Sig. Rate:\n ", round(prop_sig, 1), "%"))
+
+## Estimates graph adjustment
+p_estimates <-  data_plot %>%
+  filter(p_value <0.05)%>%
+ggplot(aes(std_estimate, fill = path_id))+
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.3)+
+  stat_dots(side = "top", justification = -0.1, binwidth=unit(c(0.001, 0.02), "npc"),color = "darkgrey", 
+            fill = "darkgrey", layout="hex") +
+  stat_halfeye(adjust = 1, width=0.5,justification = -0.1,.width = 0, alpha = 0.9)+
+  geom_boxplot(width = 0.12, outliers = F)+
+  scale_fill_manual(values = path_palette)+
+  theme_minimal()+
+  facet_grid(position~path_id, labeller = labeller(position = c(A = "unmanaged system",C = "managed system"),path_id = label_wrap_gen(width = 15)))+
+  ggtitle("Standardized path coefficients (significant relationships only) across system types and paths")+
+  guides(fill = "none", color = "none")+
+  theme(axis.title.y = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+        strip.text = element_text(size = 10, face = "bold"),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 11, face = "bold", hjust = 0))+
+  labs(title = "Distribution of significant environmental forcing effects",
+    caption = "Note: Only path coefficients with p < 0.05 are displayed. \n'Sig. Rate' represents the proportion of model iterations yielding p < 0.05.",
+    x = "Standardized path coefficient", y = NULL)+
+  geom_text(data = pval_summary, 
+            aes(x = Inf, y = Inf, label = label),
+            inherit.aes = FALSE, 
+            hjust = 1.1, vjust = 1.5, size = 3, fontface = "italic")
+
+## Model explanatory power graph adjustment
+p_r2 <- data_plot %>%
+  mutate(response = factor(response, levels = c("root", "fauna")))%>%
+ggplot(aes(r2_cond, fill = response)) +
+  stat_halfeye(adjust = 1, width=0.5,justification = -0.1,.width = 0, alpha = 0.6)+
+  geom_boxplot(width = 0.12, outliers = F)+
+  theme_minimal()+
+  scale_fill_manual(values = response_palette)+
+  facet_grid(position~response, labeller = labeller(position = c(A = "unmanaged system",C = "managed system")), scale = "free")+
+  guides(fill = "none", color = "none")+
+  theme(axis.title.y = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+        strip.text.x = element_text(size = 10, face = "bold"),
+        strip.text.y = element_blank(),  
+        strip.background.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 11, face = "bold", hjust = 0))+
+  labs(title = "Model explanatory power (conditional R²)",
+    x = expression(R[conditional]^2),y = NULL)
+
+## Final Layout 
+p_estimates
+p_r2
+tiff("../output/1.sem_results_distribution.tiff", width = 2800, height = 1300, res = 200)
+(p_r2 | p_estimates) +
+  plot_layout(widths = c(1, 3))+
+  plot_annotation(
+    title = "Comparing the relative influence of soil microclimate and root dynamics under different management intensities")
+invisible(dev.off())
+```
+
+### Balance between deterministic and stochastic process
+
+```{r}
+# 1. Isoler les résultats observés
+obs_df <- data_sem_results %>%
+  filter(type == "observed",
+         p_value < 0.05) %>%
+  select(taxon, position, time_window_start, response, predictor, path_id, std_estimate_obs = std_estimate)
+
+# 2. Isoler les statistiques du modèle nul 
+# (On assume que les colonnes sd_std_estimate et la moyenne "null" sont déjà calculées ou présentes)
+null_df <- data_sem_results %>%
+  filter(type == "null") %>%
+  select(position, time_window_start, response, predictor, path_id, 
+         std_estimate_null = std_estimate, 
+         sd_std_estimate)
+
+# 3. Joindre les deux et calculer le z-score
+zscore_results <- obs_df %>%
+  left_join(null_df, by = c("position", "time_window_start", "response", "predictor", "path_id")) %>%
+  mutate(z_score = (std_estimate_obs - std_estimate_null) / sd_std_estimate) %>%
+  filter(z_score >= quantile(z_score, 0.25, na.rm = TRUE) - 3 * IQR(z_score, na.rm = TRUE),z_score <= quantile(z_score, 0.25, na.rm = TRUE) + 3 * IQR(z_score, na.rm = TRUE)) 
+
+zscore_results %>% ggplot(aes(z_score)) + geom_histogram()
+
+zscore_results %>% 
+    mutate(path_id = str_replace(path_id, "microclimate_index_1", microclimate_index[1]), path_id = str_replace(path_id, "microclimate_index_2", microclimate_index[2])) %>%
+  ggplot(aes(z_score,position))+
+  geom_vline(xintercept = c(-1.96,1.96))+
+  geom_boxplot(alpha = 0.3)+
+  facet_grid(.~path_id, scale="free")
+
+
+zscore_results %>% 
+    mutate(path_id = str_replace(path_id, "microclimate_index_1", microclimate_index[1]), path_id = str_replace(path_id, "microclimate_index_2", microclimate_index[2])) %>%
+  ggplot(aes(as.factor(floor_date(as.Date(time_window_start), unit = "month")),z_score, fill = position))+
+  geom_hline(yintercept = c(-1.96,1.96))+
+  geom_boxplot(alpha = 0.3, position = position_dodge())+
+  facet_grid(path_id~., scale="free")
 ```
 
 ## Temporal stability of ecological "rules"
