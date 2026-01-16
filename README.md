@@ -12,7 +12,7 @@ We advance general hypotheses:
 
 Together, these hypotheses test the broader idea that structural complexity enhances the self-organization and resilience of soil communities in the face of global change.
 
-![](images/clipboard-413154406.png)
+![](images/DAG.png)
 
 ### Data
 
