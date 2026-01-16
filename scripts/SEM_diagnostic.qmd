@@ -1,0 +1,304 @@
+---
+title: "SEM diagnostic - sensitivity analysis"
+format:
+  html:
+    css: css/styles.css  
+    embed-resources: true
+    code-tools: true
+    
+execute: 
+  warning: false
+  message: false
+  echo: false
+---
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+
+# 1. ENVIRONMENT & LIBRARIES --------------------------------------------------
+# Load necessary packages for SEM, mixed models, and data wrangling
+invisible(Sys.setlocale("LC_TIME", "C"))
+libs <- c("tidyverse", "lubridate", "piecewiseSEM", "performance", "lme4", 
+          "purrr", "nlme", "moments", "car", "knitr", "kableExtra")
+invisible(lapply(libs, require, character.only = TRUE))
+
+# 2. GLOBAL DIAGNOSTIC THRESHOLDS ---------------------------------------------
+# These define what we consider a "statistically valid" model
+HETERO_THRESHOLD_MODERATE <- 0.4   # Spearman rho for Heteroscedasticity
+SKEWNESS_THRESHOLD        <- 1.0   # Goal for residual symmetry
+VIF_THRESHOLD             <- 5.0   # Limit for predictor colinearity
+MIN_RATE_DEFAULT          <- 0.3   # Default data completeness required
+
+# 3. DATA LOADING & PREPARATION -----------------------------------------------
+# Read the main database
+data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c("", "NA")) %>%
+  mutate(
+    # Standardize factors and dates
+    position = as.factor(position),
+    depth    = as.factor(depth),
+    date     = ymd_hms(date, tz = "UTC"),
+    # Create internal placeholders for easier SEM mapping
+    fauna    = all_taxa,
+    root     = root_cm2_count
+  )
+
+# Load metadata (taxa names and microclimate indices)
+fauna_vars         <- c("all_taxa", readLines("../output/fauna_vars.txt"))
+microclimate_index <- readLines("../output/microclimate_index.txt")
+```
+
+## Functions
+
+```{r}
+#| label: functions
+
+# FUNCTION: create_rolling_windows
+# Splits the time series into overlapping windows of fixed duration
+create_rolling_windows <- function(df, window_days, step_days = 1) {
+  start_dates <- seq(min(df$date), 
+                     max(df$date) - days(window_days) + hours(6), 
+                     by = paste(step_days, "days"))
+  
+  windows <- map(start_dates, ~ filter(df, date >= .x & date < .x + days(window_days)))
+  names(windows) <- format(start_dates, "%Y-%m-%d")
+  return(windows)
+}
+
+# FUNCTION: fit_psem
+# Defines the causal structure. We use lme for random effects and corAR1 for time.
+fit_psem <- function(data, m_indices) {
+  # Note: m_indices are passed but used as 'microclimate_1' and 'microclimate_2' 
+  # defined in the run_sem_pipeline wrapper.
+  psem(
+    lme(root ~ microclimate_1 + microclimate_2, data = data,
+        random = ~ 1 | orientation / depth, 
+        correlation = corAR1(form = ~ 1 | orientation / depth)),
+    lme(fauna ~ microclimate_1 + microclimate_2 + root, data = data,
+        random = ~ 1 | orientation / depth, 
+        correlation = corAR1(form = ~ 1 | orientation / depth)),
+    microclimate_1 %~~% microclimate_2
+  )
+}
+
+# FUNCTION: data statistical transformations
+# 1. Freeman-Tukey (Variance Stabilizing)
+# Best for counts with many zeros; stabilizes variance across the mean.
+transform_ft <- function(x) {
+  sqrt(x) + sqrt(x + 1)
+}
+# 2. Log-Standard (Geometric)
+# Traditional for skewed data; use log1p for safety with zeros.
+transform_log <- function(x) {
+  log1p(x) 
+}
+# 3. Hellinger Transformation
+# Minimizes the influence of extreme values (outliers) in counts.
+# Formula: sqrt(x / sum(x)) -> here applied per window to keep scale local.
+transform_hellinger <- function(x) {
+  sqrt(x / sum(x, na.rm = TRUE))
+}
+# 4. Box-Cox (Power Transformation)
+# We use a lambda of 0.5 (square root family) for soil counts.
+transform_boxcox <- function(x, lambda = 0.5) {
+  if(lambda == 0) log1p(x) else ((x + 1)^lambda - 1) / lambda
+}
+
+# FUNCTION: run_sem_pipeline
+# Orchestrates data cleaning, window splitting, and model fitting
+run_sem_pipeline <- function(taxon_var, data_raw, m_indices, 
+                             window_days = 14, step_days = 1, 
+                             min_rate = 0.3, n_windows = NULL) {
+  
+  # Map dynamic variables to standard SEM internal names
+  sem_data <- data_raw %>%
+    mutate(fauna = !!sym(taxon_var),
+           microclimate_1 = !!sym(m_indices[1]),
+           microclimate_2 = !!sym(m_indices[2]),
+           depth = as.factor(depth)) %>%
+    select(date, position, orientation, depth, fauna, root, microclimate_1, microclimate_2)
+
+  positions <- unique(sem_data$position)
+  
+  results_all <- map(positions, function(pos) {
+    df_pos <- filter(sem_data, position == pos)
+    windows <- create_rolling_windows(df_pos, window_days, step_days)
+    
+    # Filter for windows with enough data density (Total slots = window_days * 16 readings)
+    valid_windows <- keep(windows, ~ (nrow(drop_na(.x)) / (window_days * 16)) >= min_rate)
+    
+    # Randomly subsample windows for benchmarking speed
+    if (!is.null(n_windows) && length(valid_windows) > n_windows) {
+      valid_windows <- valid_windows[sample(seq_along(valid_windows), n_windows)]
+    }
+    
+    map(names(valid_windows), function(w_name) {
+      win_data <- drop_na(valid_windows[[w_name]])
+      
+      # Attempt to fit the SEM
+      model <- tryCatch(fit_psem(win_data, m_indices), error = function(e) NULL)
+      if (is.null(model)) return(NULL)
+      
+      # 1. R-Squared Extraction
+      sm <- summary(model)
+      r2_raw <- as.data.frame(sm$R2)
+      col_cond <- grep("R.squared|Conditional", names(r2_raw), value = TRUE)[1]
+      col_marg <- grep("Marginal", names(r2_raw), value = TRUE)[1]
+      
+      r2_df <- r2_raw %>%
+        mutate(r2_cond = .[[col_cond]], r2_marginal = .[[col_marg]]) %>%
+        select(response = Response, r2_cond, r2_marginal)
+      
+      # 2. Residual and Stability Diagnostics
+      lme_mods <- keep(model, inherits, "lme")
+      
+      diag_stats <- map_dfr(lme_mods, function(m) {
+        res <- residuals(m, type = "normalized")
+        fit <- fitted(m)
+        
+        # Safe extraction of AR1 Phi (handles non-positive definite variance)
+        phi_val <- tryCatch({ coef(m$modelStruct$corStruct, unconstrained = FALSE) }, error = function(e) NA)
+        
+        # Colinearity check (VIF)
+        vif_val <- tryCatch({
+          if(length(labels(terms(m))) > 1) max(car::vif(lm(formula(m), data = win_data))) else 1
+        }, error = function(e) NA)
+        
+        tibble(
+          model_id = paste(taxon_var, pos, w_name, sep="_"),
+          response = all.vars(formula(m))[1],
+          n_obs = length(res),
+          vif_max = vif_val,
+          hetero_strength = cor(abs(res), fit, method = "spearman", use = "complete.obs"),
+          skewness = moments::skewness(res, na.rm = TRUE),
+          ar1_phi = as.numeric(phi_val)
+        ) %>% left_join(r2_df, by = "response")
+      })
+      return(diag_stats)
+    })
+  }) %>% list_flatten() %>% compact()
+  
+  return(map_dfr(results_all, ~ .x))
+}
+```
+
+## Benchmarking
+
+```{r}
+#| label: benchmarking
+
+# FUNCTION: test_configuration
+# Wrapper to apply a specific transformation and run the pipeline
+test_configuration <- function(w_days, m_rate_val, transfo_type, data_raw, taxon, m_indices) {
+  df_iter <- data_raw
+# A. Apply selected transformation
+  # We apply this to the Fauna and the Root variables
+  target_vars <- c(fauna_vars, "root")
+  
+  df_iter <- df_iter %>%
+    mutate(across(all_of(target_vars), function(x) {
+      if (transfo_type == "sqrt_plus_one") return(transform_ft(x))
+      if (transfo_type == "log")           return(transform_log(x))
+      if (transfo_type == "hellinger")     return(transform_hellinger(x))
+      if (transfo_type == "box_cox")       return(transform_boxcox(x, lambda = 0.5))
+      return(x) # "none"
+    }))
+  
+  # Standardize all numeric data (Z-Score)
+  df_iter <- df_iter %>% mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+  
+  # B. Run Pipeline for a subset of windows (n=10) to assess stability
+  res_diag <- run_sem_pipeline(taxon, df_iter, m_indices, 
+                               window_days = w_days, 
+                               min_rate = m_rate_val, 
+                               n_windows = 30)
+  
+  if (is.null(res_diag) || nrow(res_diag) == 0) return(NULL)
+  
+  # C. Aggregate Performance Results
+  res_diag %>%
+    mutate(
+      is_ok = abs(hetero_strength) < HETERO_THRESHOLD_MODERATE & 
+              abs(skewness) < (SKEWNESS_THRESHOLD + 0.5) &
+              (vif_max < VIF_THRESHOLD | is.na(vif_max))
+    ) %>%
+    group_by(response) %>%
+    summarise(
+      window = w_days, min_rate = m_rate_val, transformation = transfo_type,
+      prop_valid_models    = mean(is_ok, na.rm = TRUE),
+      avg_r2_marginal      = mean(r2_marginal, na.rm = TRUE),
+      avg_r2_conditional   = mean(r2_cond, na.rm = TRUE),
+      delta_r2 = mean(r2_cond - r2_marginal, na.rm = TRUE),
+      spatial_random_ratio = mean(r2_cond - r2_marginal, na.rm = TRUE),
+      .groups = 'drop'
+    )
+}
+
+# --- DEFINE GRID AND RUN ---
+sensibility_grid <- expand.grid(
+  w_days     = c(5, 7, 10, 14, 21, 28, 30),         
+  m_rate_val = c(0.1 ,0.2, 0.3, 0.4, 0.5),         
+  transfo    = c("none", "sqrt_plus_one", "log", "box_cox", "hellinger"), 
+  stringsAsFactors = FALSE
+)
+
+benchmark_results <- sensibility_grid %>%
+  purrr::pmap_dfr(~ test_configuration(..1, ..2, ..3, data_sem_raw, fauna_vars[1], microclimate_index))
+```
+
+## Results
+
+```{r}
+#| label: summary-table
+
+benchmark_results %>%
+  filter(response == "root") %>%
+  mutate(
+    selection_score = prop_valid_models * avg_r2_marginal,
+    prop_valid_models = scales::percent(prop_valid_models, accuracy = 1),
+    across(starts_with("avg_r2") | starts_with("spatial") | selection_score, ~ round(., 3))
+  ) %>%
+  arrange(desc(selection_score)) %>%
+  select(
+    "Window" = window,
+    "Transfo" = transformation,
+    "Data %" = min_rate,
+    "Validity" = prop_valid_models,
+    "R² Marginal" = avg_r2_marginal,
+    "Spatial Noise" = spatial_random_ratio,
+    "Score" = selection_score
+  ) %>%
+  kable(caption = "Ranking of root model configurations ") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),full_width = F, position = "center") %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
+  row_spec(1, bold = TRUE, background = "#E1E9C9") 
+
+benchmark_results %>%
+  filter(response == "fauna") %>%
+  mutate(
+    selection_score = prop_valid_models * avg_r2_marginal,
+    prop_valid_models = scales::percent(prop_valid_models, accuracy = 1),
+    across(starts_with("avg_r2") | starts_with("spatial") | selection_score, ~ round(., 3))
+  ) %>%
+  arrange(desc(selection_score)) %>%
+  select(
+    "Window" = window,
+    "Transfo" = transformation,
+    "Data %" = min_rate,
+    "Validity" = prop_valid_models,
+    "R² Marginal" = avg_r2_marginal,
+    "Spatial Noise" = spatial_random_ratio,
+    "Score" = selection_score
+  ) %>%
+  kable(caption = "Ranking of fauna model configurations ") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),full_width = F, position = "center") %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
+  row_spec(1, bold = TRUE, background = "#FEC288")
+```
+
+```{r}
+#| label: results-writing
+write.csv(benchmark_results, "../output/benchmark_results_database.csv", row.names = FALSE, quote = TRUE)
+```

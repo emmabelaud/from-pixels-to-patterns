@@ -192,63 +192,6 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
 
 ## Execution
 
-### Check procedure
-
-```{r}
-# Evaluate SEM model residuals in terms of:
-# - heteroscedasticity (Spearman correlation of |residuals| vs fitted)
-# - normality (skewness and kurtosis of residuals)
-# - classical tests (Shapiro-Wilk, Spearman for info only)
-# Include number of observations to contextualize diagnostics
-# Define explicit thresholds for interpretation:
-hetero_threshold_low      <- 0.2  # |ρ| < 0.2 → low heteroscedasticity
-hetero_threshold_moderate <- 0.4  # 0.2 ≤ |ρ| < 0.4 → moderate
-skewness_threshold        <- 1    # |skewness| < 1 → acceptable
-kurtosis_min              <- 2    # kurtosis > 2
-kurtosis_max              <- 6    # kurtosis < 6
-
-# For a FAST test:
-# Perform a check on 2 windows per position
-check_run <- run_sem_pipeline(fauna_vars[1], data_transformed, microclimate_index, n_windows = 30)
-diagnostic_summary <- check_run$diagnostics %>%
-  mutate(
-    # Categorize heteroscedasticity magnitude
-    hetero_level = case_when(
-      abs(hetero_strength) < hetero_threshold_low      ~ "low",
-      abs(hetero_strength) < hetero_threshold_moderate ~ "moderate",
-      TRUE                                             ~ "strong"),
-    # Evaluate normality based on skewness and kurtosis
-    normality_ok = (abs(skewness) < skewness_threshold) &
-                    (kurtosis > kurtosis_min & kurtosis < kurtosis_max),
-    # Overall model validity
-    is_ok = (abs(hetero_strength) < hetero_threshold_moderate) &
-            (abs(skewness) < (skewness_threshold + 0.5))  # slightly more tolerant
-  ) %>%
-  # Select and order informative columns
-  select(
-    model_id,
-    response,
-    n_obs,          
-    hetero_strength,
-    hetero_level,
-    skewness,
-    kurtosis,
-    normality_ok,
-    p_normality,
-    p_homo,
-    r2_marginal,
-    r2_cond,
-    is_ok
-  )
-
-print(diagnostic_summary)
-diagnostic_summary %>%
-  count(is_ok) %>%
-  mutate(
-    proportion = n / sum(n))
-
-```
-
 ### final database
 
 ```{r}
