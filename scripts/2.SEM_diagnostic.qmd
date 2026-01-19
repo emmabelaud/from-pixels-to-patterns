@@ -9,7 +9,7 @@ format:
 execute: 
   warning: false
   message: false
-  echo: false
+  echo: true
 ---
 
 ## Setup
@@ -42,7 +42,7 @@ data_sem_raw <- read.csv("../output/SEM_database.csv", sep = ",", na.strings = c
     date     = ymd_hms(date, tz = "UTC"),
     # Create internal placeholders for easier SEM mapping
     fauna    = all_taxa,
-    root     = root_growth_cm2_count_24h    #root_cm2_count
+    root     = root_growth_cm2_count_24h #as a proxy of root growth flux  
   )
 
 # Load metadata (taxa names and microclimate indices)

@@ -20,11 +20,9 @@ invisible(Sys.setlocale("LC_TIME", "C"))
 
 dir.create("../output", showWarnings = FALSE)
 
-libs <- c(
-  "tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance",
+libs <- c("tidyverse", "lubridate", "ade4", "piecewiseSEM", "performance",
   "patchwork", "slider", "kableExtra", "phylopath", "e1071",
-  "nlme", "zoo"
-)
+  "nlme", "zoo", "ggdist")
 invisible(lapply(libs, require, character.only = TRUE))
 
 ## External inputs
