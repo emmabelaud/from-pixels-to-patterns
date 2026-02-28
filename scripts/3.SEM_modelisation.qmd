@@ -24,7 +24,7 @@ Here, those validated parameters are applied to run the **full rolling-window pS
 ### What this script produces
 
 | Output | File | Description |
-|---------------------|------------------|----------------------------------|
+|----|----|----|
 | Observed path coefficients | `SEM_results_database.csv` | Standardised estimates, p-values, R², season labels for all taxon × position × window combinations |
 | Null distribution summary | *(in memory)* | Mean and SD of path coefficients under random permutation of all causal variables |
 

@@ -18,7 +18,7 @@ execute:
 This script is the **final step** of the SEM pipeline. It loads the path coefficient database produced by `check_models_performance.qmd` and produces three analytical sections:
 
 | Section | Question | Output |
-|---------|----------|--------|
+|----|----|----|
 | **Environmental forcing** | How strongly and consistently do microclimate and root dynamics drive fauna across management types? | Distribution plots of standardised path coefficients and R² |
 | **Deterministic vs. stochastic processes** | Are observed causal effects statistically distinguishable from random noise? | Z-score distributions relative to the permutation null |
 | **Temporal stability** | Do the strengths of causal paths fluctuate over time, or remain steady? | Coefficient of variation (CV) per path and position |
@@ -28,14 +28,14 @@ This script is the **final step** of the SEM pipeline. It loads the path coeffic
 
 Two management positions are contrasted throughout:
 
-| Code | Description |
-|------|-------------|
+| Code  | Description                                             |
+|-------|---------------------------------------------------------|
 | **A** | Unmanaged system — tree cover and herbaceous vegetation |
-| **C** | Managed system — cultivated cover |
+| **C** | Managed system — cultivated cover                       |
 
 > ⚠️ **Work in progress** — several sections below are still under active development. Open questions and improvement tracks are flagged inline.
 
----
+------------------------------------------------------------------------
 
 ## 1. Setup
 
@@ -181,7 +181,7 @@ data_sem_results <- read.csv(
   left_join(path_levels, by = "path_id")
 ```
 
----
+------------------------------------------------------------------------
 
 ## 2. Environmental forcing across system types
 
@@ -339,7 +339,7 @@ tiff("../output/1.sem_results_distribution.tiff",
 invisible(dev.off())
 ```
 
----
+------------------------------------------------------------------------
 
 ## 3. Deterministic vs. stochastic processes
 
@@ -347,34 +347,39 @@ A path coefficient is considered **deterministic** (ecologically meaningful) if 
 
 $$z = \frac{\hat{\beta}_{\text{obs}} - \mu_{\text{null}}}{\sigma_{\text{null}}}$$
 
-Values beyond |z| = 1.96 indicate that the observed effect exceeds the 95 % null interval.
+Values beyond \|z\| = 1.96 indicate that the observed effect exceeds the 95 % null interval.
 
-> ⚠️ **Work in progress** — column name `time_window_start` used below may differ from the actual output schema; verify against `SEM_results_database.csv`.
+> ⚠️ **Work in progress** — column name `date_start` used below may differ from the actual output schema; verify against `SEM_results_database.csv`.
 
 ```{r z-score-prep}
 # Observed significant path coefficients
 obs_df <- data_sem_results %>%
   filter(type == "observed", p_value < 0.05) %>%
-  select(taxon, position, time_window_start, response, predictor, path_id,
+  select(taxon, position, date_start, response, predictor, path_id,
          std_estimate_obs = std_estimate)
 
 # Null distribution statistics (mean and SD across permutation iterations)
 null_df <- data_sem_results %>%
   filter(type == "null") %>%
-  select(position, time_window_start, response, predictor, path_id,
-         std_estimate_null = std_estimate,
-         sd_std_estimate)
+  group_by(position, date_start, response, predictor, path_id) %>%
+  summarise(
+    std_estimate_null = mean(std_estimate, na.rm = TRUE),
+    sd_std_estimate   = sd(std_estimate, na.rm = TRUE),
+    .groups = "drop"
+  )
 
 # Z-score: number of null SDs separating the observed estimate from the null mean
-zscore_results <- obs_df %>%
-  left_join(null_df,
-            by = c("position", "time_window_start", "response",
-                   "predictor", "path_id")) %>%
-  mutate(z_score = (std_estimate_obs - std_estimate_null) / sd_std_estimate) %>%
-  # Remove extreme z-score outliers (beyond Q1 ± 3 × IQR)
+# Filter for observed results and calculate Z-score using existing null columns
+zscore_results <- data_sem_results %>%
+  filter(type == "observed", p_value < 0.05) %>%
+  mutate(
+    # Use the columns visible in your View() output
+    z_score = (std_estimate - null_mean_estimate) / null_sd_estimate
+  ) %>%
+  # Corrected Outlier Filter: Use 0.75 for the upper bound
   filter(
     z_score >= quantile(z_score, 0.25, na.rm = TRUE) - 3 * IQR(z_score, na.rm = TRUE),
-    z_score <= quantile(z_score, 0.25, na.rm = TRUE) + 3 * IQR(z_score, na.rm = TRUE)
+    z_score <= quantile(z_score, 0.75, na.rm = TRUE) + 3 * IQR(z_score, na.rm = TRUE)
   )
 ```
 
@@ -414,16 +419,15 @@ zscore_results %>%
 #| fig-height: 4
 
 zscore_results %>%
-  mutate(
-    path_id = str_replace(path_id, "microclimate_index_1", microclimate_index[1]),
-    path_id = str_replace(path_id, "microclimate_index_2", microclimate_index[2])
-  ) %>%
+  # Ensure path_id is still a factor for consistent ordering
+  mutate(path_id = factor(path_id, levels = path_levels$path_id)) %>% 
   ggplot(aes(z_score, position, fill = position)) +
-  geom_vline(xintercept = c(-1.96, 1.96),
+  geom_vline(xintercept = c(-1.96, 1.96), 
              linetype = "dashed", color = SEM_COLORS$null_line) +
-  geom_boxplot(alpha = 0.5, outliers = FALSE) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # 'outliers = FALSE' is deprecated in newer ggplot2
   scale_fill_manual(values = position_palette) +
-  facet_grid(. ~ path_id, scales = "free") +
+  # Use label_wrap_gen to prevent long path names from overlapping
+  facet_grid(. ~ path_id, scales = "free", labeller = label_wrap_gen(width = 15)) +
   labs(
     title    = "Z-scores by management position and causal path",
     subtitle = "Each box aggregates all significant windows for that path",
@@ -451,7 +455,7 @@ zscore_results %>%
     path_id = str_replace(path_id, "microclimate_index_2", microclimate_index[2])
   ) %>%
   ggplot(aes(
-    x    = as.factor(floor_date(as.Date(time_window_start), unit = "month")),
+    x    = as.factor(floor_date(as.Date(date_start), unit = "month")),
     y    = z_score,
     fill = position
   )) +
@@ -473,18 +477,18 @@ zscore_results %>%
 
 > 💡 **Open questions:**
 >
-> - Is CV the best indicator of temporal stability, or should we consider alternatives (e.g. local entropy, regime shift detection)?
-> - Should only pre-filtered significant relationships be included in the CV computation?
-> - Could abrupt transitions in z-score time series reveal ecological regime shifts?
+> -   Is CV the best indicator of temporal stability, or should we consider alternatives (e.g. local entropy, regime shift detection)?
+> -   Should only pre-filtered significant relationships be included in the CV computation?
+> -   Could abrupt transitions in z-score time series reveal ecological regime shifts?
 
----
+------------------------------------------------------------------------
 
 ## 4. Temporal stability of causal paths
 
 How consistently do environmental factors drive soil fauna activity over time? The **Coefficient of Variation (CV)** of standardised path coefficients across rolling windows distinguishes:
 
-- **Low CV** → "steady" forcing: the environment has a predictable, consistent impact
-- **High CV** → "pulsed" or unstable forcing: the relationship fluctuates over time
+-   **Low CV** → "steady" forcing: the environment has a predictable, consistent impact
+-   **High CV** → "pulsed" or unstable forcing: the relationship fluctuates over time
 
 Comparing CV across management positions tests whether human intensification destabilises the ecosystem by replacing natural, steady rhythms with erratic biological responses.
 
@@ -541,18 +545,18 @@ ggplot(cv_global,
 
 > 💡 **Open questions:**
 >
-> - Generate CV stratified by additional factors (season, depth) to enable formal comparison tests?
-> - Should only pre-filtered significant relationships feed into the CV computation?
-> - Could identifying abrupt temporal transitions complement the CV approach?
+> -   Generate CV stratified by additional factors (season, depth) to enable formal comparison tests?
+> -   Should only pre-filtered significant relationships feed into the CV computation?
+> -   Could identifying abrupt temporal transitions complement the CV approach?
 
----
+------------------------------------------------------------------------
 
 ## 5. Spatial synchrony of forcing
 
 **Core question:** when a microclimate variable becomes a strong driver in the unmanaged zone (A), does it simultaneously become a strong driver in the managed zone (C)?
 
-- **High correlation (r ≈ 1):** management has not altered the timing of the causal rule — forcing remains governed by regional climate.
-- **Low / no correlation (r ≈ 0):** management has decoupled the site from the natural rhythm — the rules operating in the managed zone are now independent of the unmanaged ones.
+-   **High correlation (r ≈ 1):** management has not altered the timing of the causal rule — forcing remains governed by regional climate.
+-   **Low / no correlation (r ≈ 0):** management has decoupled the site from the natural rhythm — the rules operating in the managed zone are now independent of the unmanaged ones.
 
 ### 5.1 Global synchrony index
 
@@ -568,6 +572,7 @@ ggplot(cv_global,
 #|   coloured by synchrony direction.
 #| fig-width:  10
 #| fig-height: 5
+#| eval: false
 
 sync_results <- data_sem_results %>%
   select(day, position, taxon, path_id, std_estimate) %>%
@@ -627,6 +632,7 @@ ggplot(sync_results,
 #|   pathway, coloured by taxon.
 #| fig-width:  12
 #| fig-height: 7
+#| eval: false
 
 #' Compute rolling Pearson correlation between positions A and C
 #'
