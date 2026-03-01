@@ -24,7 +24,7 @@ Here, those validated parameters are applied to run the **full rolling-window pS
 ### What this script produces
 
 | Output | File | Description |
-|----|----|----|
+|------------------------|------------------------|------------------------|
 | Observed path coefficients | `SEM_results_database.csv` | Standardised estimates, p-values, R², season labels for all taxon × position × window combinations |
 | Null distribution summary | *(in memory)* | Mean and SD of path coefficients under random permutation of all causal variables |
 
@@ -317,7 +317,7 @@ sem_results_raw <- map_dfr(
 The null distribution is built by independently permuting all causal variables (fauna, root, microclimate indices) across `n_perm = 30` iterations. This breaks every directed causal link while preserving the marginal distribution of each variable. Observed path coefficients that fall far from the null mean (relative to the null SD) cannot be attributed to chance.
 
 ```{r null-distribution}
-n_perm <- 30
+n_perm <- 20
 message(sprintf(">>> Generating null distribution (n = %d permutations)...", n_perm))
 
 sem_results_null <- map_dfr(1:n_perm, function(i) {
@@ -335,7 +335,7 @@ sem_results_null <- map_dfr(1:n_perm, function(i) {
 
 # Summarise null distribution: mean and SD of each path under H₀
 sem_null_summary <- sem_results_null %>%
-  group_by(response, predictor) %>%
+  group_by(position, date_start, response, predictor) %>%
   summarise(
     null_mean_estimate = mean(estimate, na.rm = TRUE),
     null_sd_estimate   = sd(estimate,   na.rm = TRUE),
@@ -352,7 +352,7 @@ sem_null_summary <- sem_results_null %>%
 # ── Merge observed results with null summary ───────────────────────────────────
 sem_results <- sem_results_raw %>%
   mutate(type = "observed") %>%
-  left_join(sem_null_summary, by = c("response", "predictor")) %>%
+  left_join(sem_null_summary, by = c("position","date_start","response", "predictor")) %>%
   # Keep only directed causal paths (→); remove correlated error terms (~~)
   filter(!str_detect(predictor, "~~")) %>%
   mutate(path_id = paste(predictor, "->", response))
