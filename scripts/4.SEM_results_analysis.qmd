@@ -1,11 +1,14 @@
 ---
 title: "From pixels to patterns — results and visualisation"
+author: "Emma Belaud"
 format:
   html:
-    css: css/styles.css
+    css: css/styles.css  
     embed-resources: true
     code-tools: true
-execute:
+    toc: true
+    toc-depth: 4
+execute: 
   warning: false
   message: false
   echo: false
@@ -32,8 +35,6 @@ Two management positions are contrasted throughout:
 |-------|---------------------------------------------------------|
 | **A** | Unmanaged system — tree cover and herbaceous vegetation |
 | **C** | Managed system — cultivated cover                       |
-
-> ⚠️ **Work in progress** — several sections below are still under active development. Open questions and improvement tracks are flagged inline.
 
 ------------------------------------------------------------------------
 
@@ -178,7 +179,17 @@ data_sem_results <- read.csv(
   na.strings = c("", "NA")
 ) %>%
   mutate(taxon = if_else(taxon == "fauna", "null model", taxon)) %>%
-  left_join(path_levels, by = "path_id")
+  left_join(path_levels, by = "path_id")%>%
+  # Replace internal microclimate aliases with their actual index names
+  mutate(
+    predictor = case_when(
+      predictor == "microclimate_1" ~ microclimate_index[1],
+      predictor == "microclimate_2" ~ microclimate_index[2],
+      TRUE ~ predictor
+    ),
+    path_id = str_replace(path_id, "microclimate_1", microclimate_index[1]),
+    path_id = str_replace(path_id, "microclimate_2", microclimate_index[2])
+  )
 ```
 
 ------------------------------------------------------------------------
@@ -189,21 +200,9 @@ data_sem_results <- read.csv(
 
 ![](images/DAG.png)
 
-### 2.1 Prepare plotting data
-
 ```{r prep-plot-data}
 data_plot <- data_sem_results %>%
-  filter(type == "observed") %>%
-  # Replace internal microclimate aliases with their actual index names
-  mutate(
-    predictor = case_when(
-      predictor == "microclimate_1" ~ microclimate_index[1],
-      predictor == "microclimate_2" ~ microclimate_index[2],
-      TRUE ~ predictor
-    ),
-    path_id = str_replace(path_id, "microclimate_1", microclimate_index[1]),
-    path_id = str_replace(path_id, "microclimate_2", microclimate_index[2])
-  ) %>%
+  filter(type == "observed")  %>%
   # Remove extreme outliers: retain values within Q1 ± 1.5 × IQR
   filter(
     std_estimate >= quantile(std_estimate, 0.25, na.rm = TRUE) -
@@ -225,7 +224,7 @@ pval_summary <- data_plot %>%
   mutate(label = paste0("Sig. rate:\n ", round(prop_sig, 1), "%"))
 ```
 
-### 2.2 Path coefficient distributions (significant paths only)
+### 2.1 Path coefficient distributions (significant paths only)
 
 ```{r plot-estimates}
 #| fig-cap: >
@@ -278,7 +277,7 @@ p_estimates <- data_plot %>%
 p_estimates
 ```
 
-### 2.3 Model explanatory power (conditional R²)
+### 2.2 Model explanatory power (conditional R²)
 
 ```{r plot-r2}
 #| fig-cap: >
@@ -314,14 +313,12 @@ p_r2 <- data_plot %>%
   ) +
   theme_sem() +
   theme(
-    strip.text.y       = element_blank(),
+    #strip.text.y       = element_blank(),
     strip.background.y = element_blank()
   )
 
 p_r2
 ```
-
-### 2.4 Combined figure export
 
 ```{r export-fig1}
 #| include: false   # Suppress output in HTML; figure is saved to disk only
@@ -463,7 +460,9 @@ zscore_results %>%
              linetype = "dashed", color = SEM_COLORS$null_line) +
   geom_boxplot(alpha = 0.5, position = position_dodge()) +
   scale_fill_manual(values = position_palette) +
-  facet_grid(path_id ~ ., scales = "free") +
+  facet_grid(path_id ~ ., scales = "free",
+                 labeller = labeller(
+      path_id  = label_wrap_gen(width = 15))) +
   labs(
     title    = "Monthly evolution of z-scores",
     subtitle = "By causal path and management position",
@@ -572,10 +571,9 @@ ggplot(cv_global,
 #|   coloured by synchrony direction.
 #| fig-width:  10
 #| fig-height: 5
-#| eval: false
 
 sync_results <- data_sem_results %>%
-  select(day, position, taxon, path_id, std_estimate) %>%
+  select(date_start, position, taxon, path_id, std_estimate) %>% 
   pivot_wider(names_from = position, values_from = std_estimate) %>%
   group_by(path_id, taxon) %>%
   summarise(
@@ -632,7 +630,6 @@ ggplot(sync_results,
 #|   pathway, coloured by taxon.
 #| fig-width:  12
 #| fig-height: 7
-#| eval: false
 
 #' Compute rolling Pearson correlation between positions A and C
 #'
@@ -641,7 +638,7 @@ ggplot(sync_results,
 #' @return Input dataframe with an added `roll_cor` column.
 calculate_rolling_sync <- function(df, window_size = 21) {
   df %>%
-    arrange(day) %>%
+    arrange(date_start) %>%
     mutate(roll_cor = slider::slide2_dbl(
       A, C,
       ~ cor(.x, .y, use = "pairwise.complete.obs"),
@@ -656,7 +653,7 @@ position_sync_binary <- data_sem_results %>%
     path_id = str_replace(path_id, "microclimate_index_1", microclimate_index[1]),
     path_id = str_replace(path_id, "microclimate_index_2", microclimate_index[2])
   ) %>%
-  select(day, position, taxon, path_id, estimate) %>%
+  select(date_start, position, taxon, path_id, estimate) %>%
   pivot_wider(names_from = position, values_from = estimate)
 
 # Apply rolling correlation within each path × taxon group
@@ -668,14 +665,14 @@ rolling_sync_data <- position_sync_binary %>%
   unnest(rolling_cor)
 
 rolling_sync_data %>%
-  filter(!is.na(roll_cor)) %>%
-  ggplot(aes(x = day, y = roll_cor, group = taxon, color = taxon)) +
+  filter(!is.na(roll_cor), !path_id %in% c('temp_soil_max -> root','hum_soil_max -> root' )) %>%
+  ggplot(aes(x = date_start, y = roll_cor, group = taxon, color = taxon)) +
   geom_hline(yintercept = 0,
              linetype = "dashed", color = SEM_COLORS$null_line, alpha = 0.5) +
   # LOESS smoothing (span = 0.2) reduces window-to-window noise
   geom_smooth(method = "loess", span = 0.2, se = FALSE, linewidth = 1) +
   geom_rug(alpha = 0.1) +
-  facet_wrap(~ path_id, scales = "free") +
+  facet_grid(path_id~. , scales = "free") +
   scale_color_brewer(palette = "Set2") +
   labs(
     title    = "Temporal dynamics of ecological synchrony (A vs. C)",
