@@ -53,8 +53,6 @@ Builds the integrated SEM dataset from five raw data streams:
 
 **Outputs:** `SEM_database.csv`, `fauna_vars.txt`, `microclimate_index.txt`
 
-[View the analysis.](https://htmlpreview.github.io/?https://github.com/emmabelaud/from-pixels-to-patterns/blob/16274ff7bb96977773b445fa2e4e2b36eae95065/scripts/1.database_edition.html)
-
 ------------------------------------------------------------------------
 
 ### Script 2 — `2_SEM_diagnostic.qmd`
@@ -71,8 +69,6 @@ For each combination, the pipeline runs on 50 randomly sampled windows and evalu
 
 **Outputs:** `benchmark_results_database.csv`, `model_parameters.txt`
 
-[View the analysis.](https://htmlpreview.github.io/?https://github.com/emmabelaud/from-pixels-to-patterns/blob/16274ff7bb96977773b445fa2e4e2b36eae95065/scripts/2.SEM_diagnostic.html)
-
 ------------------------------------------------------------------------
 
 ### Script 3 — `3_SEM_modelisation.qmd`
@@ -84,8 +80,6 @@ $$\text{Root} \leftarrow \beta_1 \cdot \text{microclimate}_1 + \beta_2 \cdot \te
 Each equation uses a nested random intercept (`orientation / depth`) and an AR(1) correlation structure. A **null distribution** is generated via 30 permutation iterations to confirm that observed path coefficients are non-random.
 
 **Outputs:** `SEM_results_database.csv`
-
-[View the analysis.](https://htmlpreview.github.io/?https://github.com/emmabelaud/from-pixels-to-patterns/blob/16274ff7bb96977773b445fa2e4e2b36eae95065/scripts/3.SEM_modelisation.html)
 
 ------------------------------------------------------------------------
 
@@ -99,8 +93,6 @@ Produces four temporary analytical sections from the path coefficient database:
 4.  **Spatial synchrony** — Pearson r and rolling correlation of path coefficients between positions A and C over time
 
 **Outputs:** `1.sem_results_distribution.tiff`
-
-[View the analysis.](https://htmlpreview.github.io/?https://github.com/emmabelaud/from-pixels-to-patterns/blob/16274ff7bb96977773b445fa2e4e2b36eae95065/scripts/4.SEM_results_analysis.html)
 
 ------------------------------------------------------------------------
 
