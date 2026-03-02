@@ -21,7 +21,7 @@ execute:
 This script is the **final step** of the SEM pipeline. It loads the path coefficient database produced by `check_models_performance.qmd` and produces three analytical sections:
 
 | Section | Question | Output |
-|----|----|----|
+|------------------------|------------------------|------------------------|
 | **Environmental forcing** | How strongly and consistently do microclimate and root dynamics drive fauna across management types? | Distribution plots of standardised path coefficients and R² |
 | **Deterministic vs. stochastic processes** | Are observed causal effects statistically distinguishable from random noise? | Z-score distributions relative to the permutation null |
 | **Temporal stability** | Do the strengths of causal paths fluctuate over time, or remain steady? | Coefficient of variation (CV) per path and position |
@@ -196,6 +196,8 @@ data_sem_results <- read.csv(
 
 ## 2. Environmental forcing across system types
 
+> How strongly and consistently do microclimate and root dynamics drive fauna across management types?
+
 **Directed acyclic graph (DAG) — causal structure**
 
 ![](images/DAG.png)
@@ -340,21 +342,15 @@ invisible(dev.off())
 
 ## 3. Deterministic vs. stochastic processes
 
+> Are observed causal effects statistically distinguishable from random noise?
+
 A path coefficient is considered **deterministic** (ecologically meaningful) if its observed value substantially exceeds what would be expected under random permutation. This is assessed by a z-score relative to the null distribution:
 
 $$z = \frac{\hat{\beta}_{\text{obs}} - \mu_{\text{null}}}{\sigma_{\text{null}}}$$
 
 Values beyond \|z\| = 1.96 indicate that the observed effect exceeds the 95 % null interval.
 
-> ⚠️ **Work in progress** — column name `date_start` used below may differ from the actual output schema; verify against `SEM_results_database.csv`.
-
 ```{r z-score-prep}
-# Observed significant path coefficients
-obs_df <- data_sem_results %>%
-  filter(type == "observed", p_value < 0.05) %>%
-  select(taxon, position, date_start, response, predictor, path_id,
-         std_estimate_obs = std_estimate)
-
 # Z-score: number of null SDs separating the observed estimate from the null mean
 # Filter for observed results and calculate Z-score using existing null columns
 zscore_results <- data_sem_results %>%
@@ -474,7 +470,9 @@ zscore_results %>%
 
 ## 4. Temporal stability of causal paths
 
-How consistently do environmental factors drive soil fauna activity over time? The **Coefficient of Variation (CV)** of standardised path coefficients across rolling windows distinguishes:
+> Do the strengths of causal paths fluctuate over time, or remain steady?
+
+The **Coefficient of Variation (CV)** of standardised path coefficients across rolling windows distinguishes:
 
 -   **Low CV** → "steady" forcing: the environment has a predictable, consistent impact
 -   **High CV** → "pulsed" or unstable forcing: the relationship fluctuates over time
@@ -542,10 +540,12 @@ ggplot(cv_global,
 
 ## 5. Spatial synchrony of forcing
 
-**Core question:** when a microclimate variable becomes a strong driver in the unmanaged zone (A), does it simultaneously become a strong driver in the managed zone (C)?
+> Are the same causal rules operating simultaneously in both management zones?
+>
+> When a microclimate variable becomes a strong driver in the unmanaged zone (A), does it simultaneously become a strong driver in the managed zone (C)?
 
--   **High correlation (r ≈ 1):** management has not altered the timing of the causal rule — forcing remains governed by regional climate.
--   **Low / no correlation (r ≈ 0):** management has decoupled the site from the natural rhythm — the rules operating in the managed zone are now independent of the unmanaged ones.
+-   **High correlation (r ≈ 1) :** management has not altered the timing of the causal rule — forcing remains governed by regional climate.
+-   **Low / no correlation (r ≈ 0) :** management has decoupled the site from the natural rhythm — the rules operating in the managed zone are now independent of the unmanaged ones.
 
 ### 5.1 Global synchrony index
 
