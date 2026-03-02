@@ -573,8 +573,6 @@ sync_results <- data_sem_results %>%
   ) %>%
   filter(!is.na(r_A_vs_C))
 
-print(sync_results, n = 15)
-
 ggplot(sync_results,
        aes(x = reorder(path_id, r_A_vs_C), y = r_A_vs_C)) +
   geom_hline(yintercept = 0,
