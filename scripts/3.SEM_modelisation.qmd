@@ -3,17 +3,17 @@ title: "SEM — model execution and path coefficient extraction"
 author: "Emma Belaud"
 format:
   html:
-    css: css/styles.css  
+    css: css/styles.css
     embed-resources: true
     code-tools: true
     toc: true
     toc-depth: 4
-execute: 
+execute:
   warning: false
   message: false
   echo: true
-editor: 
-  markdown: 
+editor:
+  markdown:
     wrap: 72
 ---
 
@@ -30,46 +30,76 @@ This script is the **third step** of the SEM pipeline, following:
 ## What this script produces
 
 | Output | File | Description |
-|---------------------|------------------|----------------------------------|
-| Observed path coefficients | `SEM_results_database.csv` | Standardised estimates, p-values, R², season labels for all taxon × window combinations |
+|----|----|----|
+| Observed path coefficients | `SEM_results_database.csv` | Standardised estimates, p-values, R², and land-use-conditional effects for all taxon × window combinations |
 
 ## Statistical approach
 
 The causal model has four structural equations organised in three tiers,
 with `land_use` (0 = unmanaged / A, 1 = managed / C) as the exogenous
-binary driver:
+binary driver. **Tiers 2 and 3 include interaction terms** between
+`land_use` and all continuous predictors, so the strength of each causal
+path is estimated separately for each management context.
 
-$$\text{Tier 1} \quad \text{microclimate}_1 \leftarrow \beta_1 \cdot \text{land\_use}$$
-$$\phantom{\text{Tier 1}} \quad \text{microclimate}_2 \leftarrow \beta_2 \cdot \text{land\_use}$$
-$$\text{Tier 2} \quad \text{Root} \leftarrow \beta_3 \cdot \text{microclimate}_1 + \beta_4 \cdot \text{microclimate}_2 + \beta_5 \cdot \text{land\_use}$$
-$$\text{Tier 3} \quad \text{Fauna} \leftarrow \beta_6 \cdot \text{microclimate}_1 + \beta_7 \cdot \text{microclimate}_2 + \beta_8 \cdot \text{Root} + \beta_9 \cdot \text{land\_use}$$
+**Tier 1 — land use shapes microclimate** (additive; `land_use` is the
+sole driver at this level):
 
-The residual covariance between the two microclimate indices is modelled
-explicitly with a `%~~%` term, since both are influenced by the same
-exogenous physical drivers (topography, regional climate) beyond the
-binary land-use contrast.
+$$\text{microclimate}_1 \leftarrow \beta_1 \cdot \text{land\_use}$$
+$$\text{microclimate}_2 \leftarrow \beta_2 \cdot \text{land\_use}$$
+
+**Tier 2 — microclimate × land use drives root** (interactions test
+whether microclimate sensitivity of root differs by management):
+
+$$\text{Root} \leftarrow \beta_3 \cdot \text{mc}_1 + \beta_4 \cdot \text{mc}_2 + \beta_5 \cdot \text{lu} + \beta_6 \cdot (\text{mc}_1 \times \text{lu}) + \beta_7 \cdot (\text{mc}_2 \times \text{lu})$$
+
+**Tier 3 — (microclimate + root) × land use drives fauna** (the critical
+interaction $\beta_{14}$ tests whether root drives fauna differently in
+managed vs unmanaged soils):
+
+$$\text{Fauna} \leftarrow \beta_8 \cdot \text{mc}_1 + \beta_9 \cdot \text{mc}_2 + \beta_{10} \cdot \text{Root} + \beta_{11} \cdot \text{lu} + \beta_{12} \cdot (\text{mc}_1 \times \text{lu}) + \beta_{13} \cdot (\text{mc}_2 \times \text{lu}) + \beta_{14} \cdot (\text{Root} \times \text{lu})$$
+
+*where mc = microclimate index, lu = land_use.*
+
+### Reading the interaction coefficients
+
+Because `land_use` is binary (0 = A, 1 = C) and is **not** z-scored, the
+coefficients have a direct, asymmetric interpretation:
+
+| Coefficient | Meaning |
+|----|----|
+| `root` (β₁₀) | Root → fauna slope **in the unmanaged system** (baseline, land_use = 0) |
+| `root:land_use` (β₁₄) | **Difference** in slope between managed and unmanaged |
+| β₁₀ + β₁₄ | Root → fauna slope **in the managed system** |
+| `land_use` (β₁₁) | Direct management effect on fauna, independent of microclimate and root |
+
+A significant positive β₁₄ means root is a **stronger** driver of fauna
+in the managed system; a negative β₁₄ means it is **weaker**. The same
+logic applies to all microclimate interaction terms.
+
+The residual covariance `microclimate_1 %~~% microclimate_2` is modelled
+explicitly because both indices share unmeasured physical drivers
+(radiation, topography) beyond the binary land-use contrast. Without
+this term, piecewiseSEM issues missing-path claims and inflates
+d-separation test statistics.
 
 Each equation uses a **nested random intercept** (`orientation / depth`)
 and an **AR(1) correlation structure** to account for temporal
 autocorrelation within scanner groups. The optimizer is set to `optim`
-with 200 maximum iterations to improve convergence stability with nested
-random effects.
+with 200 maximum iterations to improve convergence stability.
 
 **Transformations** are applied differentially before z-score
 standardisation:
 
 -   `root` — transformation selected during sensitivity analysis
     (`TRANSFO_ROOT`)
--   `fauna` variables — transformation selected during sensitivity
-    analysis (`TRANSFO_FAUNA`)
--   `microclimate_1` — response-specific transformation
-    (`TRANSFO_MICROCLIMATE_1`), restricted to `"log"` or `"none"`
-    (count-specific transforms are not meaningful for continuous
-    environmental variables)
--   `microclimate_2` — response-specific transformation
-    (`TRANSFO_MICROCLIMATE_2`), same restriction as above
--   `land_use` — excluded from z-scoring to preserve its interpretation
-    as a binary 0/1 contrast
+-   `fauna` variables — transformation from sensitivity analysis
+    (`TRANSFO_FAUNA`)
+-   `microclimate_1` / `microclimate_2` — — transformation from
+    sensitivity analysis (`TRANSFO_MICROCLIMATE_1` /
+    `TRANSFO_MICROCLIMATE_2`)
+-   `land_use` — excluded from z-scoring to preserve the binary 0/1
+    contrast and ensure interaction coefficients remain interpretable as
+    slope differences
 
 ------------------------------------------------------------------------
 
@@ -104,11 +134,7 @@ invisible(lapply(libs, require, character.only = TRUE))
 
 Parameters were determined in `sem_diagnostic.qmd` and saved to
 `model_parameters.txt`. If the file is missing, safe fallback defaults
-are used with a warning.
-
-Note: `microclimate_1` and `microclimate_2` may receive different
-transformations because the sensitivity analysis selects them
-independently. Both are restricted to `"log"` or `"none"`.
+are applied with a warning.
 
 ```{r load-params}
 if (file.exists("../output/model_parameters.txt")) {
@@ -155,8 +181,10 @@ data_sem_raw <- read.csv("../output/SEM_database.csv",
     position = as.factor(position),
     depth    = as.factor(depth),
     # Binary land-use contrast: 0 = unmanaged (A), 1 = managed (C)
-    # Kept as numeric — not z-scored — so the path coefficient is interpretable
-    # as the direct effect of moving from A to C management
+    # Kept as numeric and NOT z-scored so that:
+    #   (a) main effect coefficients are interpretable as A → C contrasts
+    #   (b) interaction coefficients represent the *difference* in slope
+    #       between management types on the original β scale
     land_use = as.numeric(position == "C"),
     date     = ymd_hms(date, tz = "UTC"),
     root     = root_growth_cm2_count_24h   # 24-hour root growth flux (cm²)
@@ -170,21 +198,22 @@ microclimate_index <- readLines("../output/microclimate_index.txt")
 #' Apply a named variance-stabilising transformation to a numeric vector
 #'
 #' @param x       Numeric vector (counts, densities, or continuous indices).
-#' @param method  Character. One of: "none", "sqrt_plus_one", "log", "hellinger".
+#' @param method  Character. One of: "none","sqrt", "sqrt_plus_one", "log", "hellinger".
 #' @return Transformed numeric vector of the same length.
 apply_transfo <- function(x, method) {
   switch(method,
-    "sqrt_plus_one" = sqrt(x) + sqrt(x + 1),         # Freeman-Tukey (counts)
-    "log"           = log1p(x),                        # log(x + 1)
-    "hellinger"     = sqrt(x / sum(x, na.rm = TRUE)), # window-relative scale
-    x                                                  # "none": identity
+    "sqrt_plus_one" = sqrt(x) + sqrt(x + 1),          # Freeman-Tukey (counts)
+    "sqrt"          = sqrt(x), 
+    "log"           = log1p(x),                         # log(x + 1)
+    "hellinger"     = sqrt(x / sum(x, na.rm = TRUE)),  # window-relative scale
+    x                                                   # "none": identity
   )
 }
 
 # ── Apply differential transformations ────────────────────────────────────────
 data_transformed <- data_sem_raw %>%
 
-  # Root: biological flux variable — all four transforms are valid candidates
+  # Root: biological flux — all four transforms are valid candidates
   mutate(root = apply_transfo(root, TRANSFO_ROOT)) %>%
 
   # Fauna variables: same rationale as root (count data)
@@ -193,21 +222,21 @@ data_transformed <- data_sem_raw %>%
     ~ apply_transfo(., TRANSFO_FAUNA)
   )) %>%
 
-  # Microclimate indices: each receives its own independently selected
-  # transformation (log or none). Count-specific transforms are never applied
-  # to continuous environmental variables even if they appear in TRANSFO_MICROCLIMATE_*.
+  # Microclimate indices: restricted to log or none
+  # Count-specific transforms are not meaningful for continuous environmental
+  # variables, so they are silently downgraded to "none" if selected
   mutate(across(
-    all_of(microclimate_index[1]),  # microclimate_1
-    ~ apply_transfo(., if (TRANSFO_MICROCLIMATE_1 %in% c("log", "none"))
-                         TRANSFO_MICROCLIMATE_1 else "none")
+    all_of(microclimate_index[1]),
+    ~ apply_transfo(.,  TRANSFO_MICROCLIMATE_1)
   )) %>%
   mutate(across(
-    all_of(microclimate_index[2]),  # microclimate_2
-    ~ apply_transfo(., if (TRANSFO_MICROCLIMATE_2 %in% c("log", "none"))
-                         TRANSFO_MICROCLIMATE_2 else "none")
+    all_of(microclimate_index[2]),
+    ~ apply_transfo(., TRANSFO_MICROCLIMATE_2)
   )) %>%
 
   # Z-score standardisation: all numeric variables EXCEPT land_use
+  # Excluding land_use ensures interaction coefficients represent actual
+  # slope differences between management types, not scaled contrasts
   mutate(across(
     where(is.numeric) & !all_of("land_use"),
     ~ as.numeric(scale(.))
@@ -242,28 +271,26 @@ create_rolling_windows <- function(df, window_days, step_days = 1) {
 
 ### 4.2 SEM structure
 
-The four-equation piecewise SEM is fixed across all windows and taxa.
-`land_use` enters all three tiers as the exogenous management driver.
+Tiers 2 and 3 use `* land_use` syntax, which R expands into the main
+effects plus all pairwise interactions with `land_use`. This allows the
+slope of every continuous predictor to differ between management
+contexts. Tier 1 remains additive because `land_use` is the sole
+predictor — an interaction with itself is undefined.
 
-The residual covariance `microclimate_1 %~~% microclimate_2` is included
-because both indices share unmeasured physical drivers (radiation,
-topography) beyond the binary land-use effect. Without this term,
-piecewiseSEM would issue missing-path claims and inflate d-separation
-test statistics.
-
-Each `lme` call uses `opt = "optim"` with 200 iterations — more stable
-than the default `nlminb` for complex nested + AR(1) structures.
+The residual covariance `microclimate_1 %~~% microclimate_2` accounts
+for shared physical drivers (radiation, topography) not captured by the
+binary land-use contrast.
 
 ```{r SEM-structure}
-#' Fit the piecewise SEM for a single data window
+#' Fit the piecewise SEM with interaction terms for a single data window
 #'
-#' @param data      Dataframe with columns: `land_use`, `root`, `fauna`,
-#'                  `microclimate_1`, `microclimate_2`, `orientation`, `depth`.
-#' @return A `psem` object, or NULL if fitting fails.
+#' @param data Dataframe with columns: `land_use`, `root`, `fauna`,
+#'             `microclimate_1`, `microclimate_2`, `orientation`, `depth`.
+#' @return A `psem` object.
 fit_psem <- function(data) {
   psem(
 
-    # ── Tier 1: land use drives both microclimate indices ─────────────────────
+    # ── Tier 1: land use shapes microclimate (additive) ───────────────────────
     lme(microclimate_1 ~ land_use,
         data        = data,
         random      = ~ 1 | orientation / depth,
@@ -276,15 +303,19 @@ fit_psem <- function(data) {
         correlation = corAR1(form = ~ 1 | orientation / depth),
         control     = lmeControl(msMaxIter = 200, opt = "optim")),
 
-    # ── Tier 2: microclimate + land use drive root ────────────────────────────
-    lme(root ~ microclimate_1 + microclimate_2 + land_use,
+    # ── Tier 2: (microclimate) × land use drives root ─────────────────────────
+    # Interactions test whether microclimate sensitivity of root differs by
+    # management type
+    lme(root ~ (microclimate_1 + microclimate_2) * land_use,
         data        = data,
         random      = ~ 1 | orientation / depth,
         correlation = corAR1(form = ~ 1 | orientation / depth),
         control     = lmeControl(msMaxIter = 200, opt = "optim")),
 
-    # ── Tier 3: everything drives fauna ──────────────────────────────────────
-    lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
+    # ── Tier 3: (microclimate + root) × land use drives fauna ────────────────
+    # Key interaction: root:land_use coefficient = difference in root → fauna
+    # slope between managed (C) and unmanaged (A) systems
+    lme(fauna ~ (microclimate_1 + microclimate_2 + root) * land_use,
         data        = data,
         random      = ~ 1 | orientation / depth,
         correlation = corAR1(form = ~ 1 | orientation / depth),
@@ -301,9 +332,10 @@ fit_psem <- function(data) {
 ```{r fixed-pipeline}
 #' Run the full rolling-window SEM pipeline for one taxon variable
 #'
-#' Both management positions (A = 0, C = 1) are modelled jointly via `land_use`;
-#' there is no per-position split. Windows are checked for data sufficiency,
-#' variance, and land_use level representativeness before fitting.
+#' Both management positions (A = 0, C = 1) are modelled jointly via
+#' `land_use` and its interactions with continuous predictors.
+#' Windows are checked for data sufficiency, variance, and land_use level
+#' representativeness before fitting.
 #'
 #' @param taxon_var   Character. Column name of the fauna variable to model.
 #' @param data_raw    Dataframe. Transformed and z-score standardised SEM database.
@@ -311,13 +343,14 @@ fit_psem <- function(data) {
 #' @param window_days Integer. Window duration (days).
 #' @param min_rate    Numeric [0, 1]. Minimum data completeness ratio.
 #'                    Denominator = window_days × 16 slots/day × 2 positions.
-#' @return Dataframe with one row per path coefficient, or NULL if no valid windows.
+#' @return Dataframe with one row per path coefficient (including interactions),
+#'         or NULL if no valid windows.
 run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
                              window_days, min_rate) {
 
   cat("\n--- Processing taxon:", taxon_var, "---\n")
 
-  # ── Rename dynamic columns to fixed internal SEM names ────────────────────
+  # Rename dynamic columns to fixed internal SEM names
   sem_data <- data_raw %>%
     mutate(
       fauna          = !!sym(taxon_var),
@@ -331,7 +364,7 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
   windows <- create_rolling_windows(sem_data, window_days, step_days = 1)
   if (length(windows) == 0) return(NULL)
 
-  # ── Filter windows by data completeness ───────────────────────────────────
+  # Filter windows by data completeness
   # Max possible rows: window_days × 16 reading slots × 2 land-use positions
   valid_wins <- keep(windows,
                      ~ (nrow(drop_na(.x)) / (window_days * 16 * 2)) >= min_rate)
@@ -341,27 +374,26 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
 
   if (length(valid_wins) == 0) return(NULL)
 
-  # ── Fit SEM on each valid window ──────────────────────────────────────────
   results_list <- map(names(valid_wins), function(w_name) {
 
     win_data <- valid_wins[[w_name]] %>%
       drop_na() %>%
-      # Sort required by corAR1: observations must be in time order within groups
+      # corAR1 requires observations sorted in time order within groups
       arrange(land_use, orientation, depth, date)
 
     # Guard 1: skip windows where any modelled variable has zero variance
-    # (singular Cholesky decomposition in lme / summary.psem)
+    # (causes singular Cholesky decomposition in lme and summary.psem)
     vars_to_check <- c("fauna", "root", "microclimate_1", "microclimate_2")
     if (any(sapply(win_data[vars_to_check], sd, na.rm = TRUE) == 0)) return(NULL)
 
     # Guard 2: skip windows where land_use has only one level
-    # (both positions must be present to estimate the land_use paths)
+    # (interactions cannot be estimated without both positions present)
     if (length(unique(win_data$land_use)) < 2) return(NULL)
 
     # Guard 3: skip windows with non-finite values (from transforms / scaling)
     if (any(!is.finite(as.matrix(win_data[vars_to_check])))) return(NULL)
 
-    # Fit the SEM — mute lme optimisation warnings; catch hard convergence errors
+    # Fit SEM — mute optimisation warnings; catch hard convergence errors
     model <- tryCatch(
       withCallingHandlers(
         fit_psem(win_data),
@@ -371,14 +403,15 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
     )
     if (is.null(model)) return(NULL)
 
-    # summary.psem() can itself fail (Cholesky, singular fit) — wrap separately
+    # summary.psem() can itself fail on singular fits — wrap separately
     sm <- tryCatch(summary(model), error = function(e) NULL)
     if (is.null(sm)) return(NULL)
 
-    # ── Path coefficients ──────────────────────────────────────────────────
+    # ── Path coefficients ────────────────────────────────────────────────────
     coefs <- as.data.frame(sm$coefficients)
 
-    # ── R² (marginal = fixed effects; conditional = fixed + random) ────────
+    # ── R² (marginal = fixed effects; conditional = fixed + random) ──────────
+    # Column names vary across piecewiseSEM versions — detect dynamically
     r2_raw <- as.data.frame(sm$R2)
     r2_df  <- r2_raw %>%
       mutate(
@@ -429,15 +462,52 @@ message(sprintf("Observed models complete: %d rows across %d taxa.",
 
 ```{r consolidation}
 
-# ── Clean results  ───────────────────────────────────
+# ── Classify paths ────────────────────────────────────────────────────────────
+# piecewiseSEM labels interaction predictors as "predictor:land_use".
+# We tag each row with its path type for downstream filtering:
+#   - "main"        : standard directed path (e.g. root → fauna)
+#   - "interaction" : land-use-modulated path (e.g. root:land_use → fauna)
+# Correlated error terms (~~) are dropped entirely.
+
 sem_results <- sem_results_raw %>%
-  # Keep only directed causal paths (→); remove correlated error terms (~~)
   filter(!str_detect(predictor, "~~")) %>%
   mutate(
-    path_id = paste(predictor, "->", response)
+    path_type = if_else(str_detect(predictor, ":land_use"),
+                        "interaction", "main"),
+    path_id   = paste(predictor, "→", response)
   )
 
-# ── Season labels ──────────────────────────────────────────────────────────────
+# ── Derive land-use-conditional slopes ────────────────────────────────────────
+# For each main path X → Y that has a corresponding interaction X:land_use → Y:
+#   Effect in unmanaged (A, land_use = 0) = main effect coefficient (std_estimate)
+#   Effect in managed   (C, land_use = 1) = main + interaction coefficient
+#
+# This is computed here so that both conditional slopes are available as
+# first-class columns in the results database, ready for direct A vs C
+# comparison in the visualisation script.
+
+interaction_coefs <- sem_results %>%
+  filter(path_type == "interaction") %>%
+  mutate(base_predictor = str_remove(predictor, ":land_use")) %>%
+  select(taxon, date_start, response,
+         base_predictor,
+         interaction_std_estimate = std_estimate,
+         interaction_p_value      = p_value)
+
+sem_results <- sem_results %>%
+  filter(path_type == "main") %>%
+  left_join(interaction_coefs,
+            by = c("taxon", "date_start", "response",
+                   "predictor" = "base_predictor")) %>%
+  mutate(
+    # std_estimate     = slope in unmanaged system (A, land_use = 0)
+    # std_estimate_C   = slope in managed system   (C, land_use = 1)
+    # NA when no interaction exists for this path (e.g. Tier 1 paths)
+    std_estimate_C  = std_estimate + replace_na(interaction_std_estimate, 0),
+    has_interaction = !is.na(interaction_std_estimate)
+  )
+
+# ── Season labels ─────────────────────────────────────────────────────────────
 season_lookup <- tibble(
   month  = 1:12,
   season = c("Winter", "Winter",
@@ -451,14 +521,15 @@ sem_results <- sem_results %>%
   mutate(month = month(date_start)) %>%
   left_join(season_lookup, by = "month")
 
-# ── Export ─────────────────────────────────────────────────────────────────────
+# ── Export ────────────────────────────────────────────────────────────────────
 write.csv(sem_results, "../output/SEM_results_database.csv", row.names = FALSE)
 
 message(sprintf(
-  "Export complete: %d rows | %d unique taxa | %d unique paths",
+  "Export complete: %d rows | %d taxa | %d paths (%d with land-use interaction)",
   nrow(sem_results),
   n_distinct(sem_results$taxon),
-  n_distinct(sem_results$path_id)
+  n_distinct(sem_results$path_id),
+  sum(sem_results$has_interaction, na.rm = TRUE)
 ))
 ```
 
@@ -466,23 +537,36 @@ message(sprintf(
 
 ## 7. Quick sanity check
 
-```{r sanity-check}
-# Overview table: n windows, mean R² and proportion of land_use paths significant
-# across taxa — a fast check that the pipeline produced meaningful output
+```{r sanity-check-table}
+# For each path, report the mean slope in each management context (A and C),
+# the mean difference (Δ = C − A = mean interaction coefficient), and the
+# proportion of windows where the interaction is significant.
+# This is the primary check that the interaction structure produced
+# meaningful, interpretable output.
+
 sem_results %>%
-  filter(predictor == "land_use") %>%
-  group_by(taxon, response) %>%
+  filter(response %in% c("root", "fauna")) %>%
+  group_by(taxon, path_id, has_interaction) %>%
   summarise(
-    n_windows      = n(),
-    mean_std_est   = round(mean(std_estimate, na.rm = TRUE), 3),
-    prop_p05       = round(mean(p_value < 0.05, na.rm = TRUE), 2),
-    mean_r2_marg   = round(mean(r2_marg, na.rm = TRUE), 3),
+    n_windows    = n(),
+    # Slope in unmanaged context (land_use = 0, baseline)
+    mean_beta_A  = round(mean(std_estimate,   na.rm = TRUE), 3),
+    # Slope in managed context (land_use = 1)
+    mean_beta_C  = round(mean(std_estimate_C, na.rm = TRUE), 3),
+    # Mean difference: positive = stronger effect in managed system
+    mean_delta   = round(mean(std_estimate_C - std_estimate, na.rm = TRUE), 3),
+    prop_sig_A   = round(mean(p_value < 0.05,               na.rm = TRUE), 2),
+    prop_sig_int = round(mean(interaction_p_value < 0.05,   na.rm = TRUE), 2),
+    mean_r2_marg = round(mean(r2_marg,                      na.rm = TRUE), 3),
     .groups = "drop"
   ) %>%
-  arrange(response, taxon) %>%
+  arrange(taxon, path_id) %>%
   knitr::kable(
-    caption = "Land-use path summary across taxa and responses",
-    col.names = c("Taxon", "Response", "N windows",
-                  "Mean std. estimate", "Prop. p < 0.05", "Mean R² marg.")
+    caption = "Path summary: slopes in unmanaged (A) vs managed (C) contexts",
+    col.names = c("Taxon", "Path", "Has interaction",
+                  "N windows",
+                  "Mean β (A)", "Mean β (C)", "Mean Δ (C−A)",
+                  "Prop. sig. main", "Prop. sig. interaction",
+                  "Mean R² marg.")
   )
 ```
