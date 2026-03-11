@@ -27,7 +27,7 @@ This script is the **first step** of the SEM pipeline. It assembles all input va
 ### What this script produces
 
 | Output | File | Description |
-|----|----|----|
+|------------------------|------------------------|------------------------|
 | Main SEM database | `SEM_database.csv` | One row per scanner × 6-hour time step, with fauna counts, environmental variables, root metrics, and season labels |
 | Taxa list | `fauna_vars.txt` | Names of invertebrate taxa retained for modelling (≥ 8 % of total observations) |
 | Microclimate indices | `microclimate_index.txt` | The two most informative and orthogonal microclimatic summary variables, selected by PCA |
@@ -37,8 +37,8 @@ This script is the **first step** of the SEM pipeline. It assembles all input va
 Five data streams are integrated:
 
 | Step | Source | Key processing |
-|----|----|----|
-| **1. Fauna detections** | In-situ minirhizotron images | Filter to 6-hour scan times; recode fine taxa to higher taxonomic levels; fill unobserved taxon–date combinations with 0 (absent) vs. NA (missing image) |
+|------------------------|------------------------|------------------------|
+| **1. Fauna detections** | In-situ scanners images | Filter to 6-hour scan times; recode fine taxa to higher taxonomic levels; fill unobserved taxon–date combinations with 0 (absent) vs. NA (missing image) |
 | **2. Soil probes** | DIAMS sensors | Join by date × depth × position |
 | **3. Air probes** | DIAMS sensors | Join by date × position |
 | **4. Microclimatic indices** | Derived from probes | Compute five rolling-window indices (median, amplitude, rate of change, max, min) per variable; select the two most orthogonal via PCA (cos² ≥ 0.7) |
@@ -98,7 +98,7 @@ df <- df_raw %>%
     minute = minute(date)
   ) %>%
   # Restrict to the main study period
-  filter(date > "2024-03-01 00:00:00") %>%
+  filter(date > "2024-06-01 00:00:00") %>%
   # Keep only the four canonical daily scan times
   filter(minute == 0, hour %in% c(0, 6, 12, 18))
 ```
@@ -401,18 +401,9 @@ soil_probe_data <- read.csv("../data/Diams_AF1W_soil.csv") %>%
   ) %>%
   drop_na()
 
-# Air temperature and humidity (position × date)
-air_probe_data <- read.csv("../data/Diams_AF1W_air.csv") %>%
-  mutate(
-    date     = as.POSIXct(date, format = "%Y-%m-%d %H:%M:%S"),
-    position = as.factor(position)
-  ) %>%
-  drop_na()
-
 # Merge environmental variables into the main dataframe
 data_sem <- data_sem %>%
-  left_join(soil_probe_data, by = c("date", "depth", "position")) %>%
-  left_join(air_probe_data,  by = c("date", "position"))
+  left_join(soil_probe_data, by = c("date", "depth", "position"))
 ```
 
 ------------------------------------------------------------------------
@@ -432,7 +423,7 @@ missing_data_rate <- 0.3     # Max fraction of NAs tolerated within a window
 Following Grooss et al. (in prep.), five indices summarise each environmental variable over the rolling window:
 
 | Index | Description |
-|----|----|
+|------------------------------------|------------------------------------|
 | `median` | Central tendency, robust to extremes |
 | `amplitude` | 5th–95th percentile range (within-window variability) |
 | `change_ratio` | Median of successive differences (instantaneous variability) |
@@ -469,7 +460,7 @@ data_sem_indices <- data_sem %>%
   group_by(position, orientation, depth) %>%
   mutate(
     across(
-      vars_to_index,
+      all_of(vars_to_index),
       ~ {
         m <- rollapplyr(.x, window_size, index_compute_function,
                         by.column = FALSE, fill = NA)
@@ -481,8 +472,6 @@ data_sem_indices <- data_sem %>%
     )
   ) %>%
   ungroup()
-
-head(data_sem_indices)
 ```
 
 ### 4.3 Select the two most informative, orthogonal indices via PCA
@@ -521,11 +510,7 @@ cat("Microclimate indices selected:", microclimate_index[1], "and", microclimate
 
 # Add the two selected indices back to the main dataframe
 data_sem <- data_sem %>%
-  left_join(
-    data_sem_indices %>%
-      select(date, position, orientation, depth, all_of(microclimate_index)),
-    by = c("date", "position", "orientation", "depth")
-  )
+  left_join(data_sem_indices %>%select(date, position, orientation, depth, all_of(microclimate_index)),by = c("date", "position", "orientation", "depth"))
 
 # Export selected index names for downstream scripts
 writeLines(microclimate_index, con = "../output/microclimate_index.txt")
@@ -694,17 +679,6 @@ data_sem <- data_sem %>%
       dplyr::select(day, season),
     by = "day"
   )
-```
-
-------------------------------------------------------------------------
-
-## 7. (Optional) Data standardisation
-
-Uncomment the line below to z-score standardise all numeric variables before export.
-
-```{r standardise}
-#data_sem <- data_sem %>%
-#   mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
 ```
 
 ------------------------------------------------------------------------
