@@ -28,7 +28,7 @@ The overarching question is whether perennial vegetation buffers soil communitie
 
 ![SEM diagram](images/image.png)
 
-The model is fitted independently on overlapping rolling time windows. All variables are z-score standardised prior to modelling, making path coefficients directly comparable across taxa and predictors. `land_use` (0 = A, 1 = C) is the exogenous binary driver and is deliberately excluded from z-scoring so that interaction coefficients retain their interpretation as slope differences between management types.
+The model is fitted independently on overlapping rolling time windows. All variables are z-score standardised prior to modelling, making path coefficients directly comparable across taxa and predictors. 
 
 **Tier 1 — land use shapes microclimate**
 
@@ -41,20 +41,15 @@ microclimate_2 ← β₂ · land_use
 
 ```         
 root ← β₃ · mc₁ + β₄ · mc₂ + β₅ · land_use
-     + β₆ · (mc₁ × land_use) + β₇ · (mc₂ × land_use)
 ```
 
 **Tier 3 — microclimate + root × land use drives fauna**
 
 ```         
-fauna ← β₈ · mc₁ + β₉ · mc₂ + β₁₀ · root + β₁₁ · land_use
-      + β₁₂ · (mc₁ × land_use) + β₁₃ · (mc₂ × land_use)
-      + β₁₄ · (root × land_use)
+fauna ← β₆ · mc₁ + β₇ · mc₂ + β₈ · root + β₉ · land_use
 ```
 
 Each equation includes a nested random intercept (`orientation / depth`) and an AR(1) correlation structure to account for temporal autocorrelation within scanner groups. A residual covariance term (`microclimate_1 %~~% microclimate_2`) captures shared physical drivers not represented by the binary land-use contrast.
-
-The interaction structure produces an intentional asymmetry in the output: `std_estimate` is the path slope in the unmanaged system (land_use = 0, baseline); `std_estimate_C` is the total slope in the managed system (main effect + interaction). `p_value` tests whether the slope in A differs from zero; `interaction_p_value` tests whether the slope in C differs from the slope in A. There is no direct significance test for the slope in C alone — this asymmetry is carried through all figures and tables in script 4.
 
 ------------------------------------------------------------------------
 
