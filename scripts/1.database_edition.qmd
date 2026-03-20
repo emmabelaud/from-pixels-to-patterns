@@ -98,7 +98,7 @@ df <- df_raw %>%
     minute = minute(date)
   ) %>%
   # Restrict to the main study period
-  filter(date > "2024-06-01 00:00:00") %>%
+  filter(date > "2024-04-01 00:00:00") %>%
   # Keep only the four canonical daily scan times
   filter(minute == 0, hour %in% c(0, 6, 12, 18))
 ```
@@ -494,7 +494,7 @@ var_names <- rownames(var_coord)
 
 # Quality of representation: cos² per variable (sum of squared loadings)
 var_cos2  <- rowSums(var_coord^2)
-good_vars <- var_names[var_cos2 >= 0.7]
+good_vars <- var_names[var_cos2 >= 0.8]
 
 # Cosine of the angle between two loading vectors (measure of collinearity)
 cos_angle <- function(v1, v2) sum(v1 * v2) / (sqrt(sum(v1^2)) * sqrt(sum(v2^2)))

@@ -1,8 +1,8 @@
 {
   "selected_window": [5],
-  "selected_min_rate": [0.2],
+  "selected_min_rate": [0.1],
   "transform_root": ["hellinger"],
   "transform_fauna": ["log"],
   "transform_microclimate_1": ["hellinger"],
-  "transform_microclimate_2": ["sqrt"]
+  "transform_microclimate_2": ["sqrt_plus_one"]
 }

@@ -1,5 +1,5 @@
 ---
-title: "SEM — model execution and path coefficient extraction"
+title: "SEM — model execution and output database generation"
 author: "Emma Belaud"
 format:
   html:
@@ -12,858 +12,69 @@ execute:
   warning: false
   message: false
   echo: true
-editor:
-  markdown:
-    wrap: 72
 ---
 
 # Overview
 
 ## Role in the pipeline
 
-This script is the **third step** of the SEM pipeline, following:
+Third step of the SEM pipeline, following:
 
-1.  `data_preparation.qmd` — builds the full SEM database
-2.  `sem_diagnostic.qmd` — selects the optimal window, completeness
-    threshold, and transformations
+1. `data_preparation.qmd` — assembles the SEM database
+2. `sem_diagnostic.qmd` — selects the optimal window, transformation, and
+   valid windows
 
-## What this script produces
+This script performs **all modelling** and writes the result databases that
+`results_visualisation.qmd` reads for tables and figures. No figures are
+produced here.
 
-| Output | File | Description |
-|------------------------|------------------------|------------------------|
-| Observed path coefficients | `SEM_results_database.csv` | Standardised estimates, p-values, R², and system-specific effects for all taxon × window combinations |
+## Outputs produced
 
-## Statistical approach
+| File | Content | Used by |
+|---|---|---|
+| `H1_adjusted_values.csv` | Per-observation RE-adjusted faunal counts | H1 figure |
+| `H1_model_summary.csv` | Fixed-effect estimate, Hedge's g, p-value | H1 figure annotation |
+| `DAG_coefficients.csv` | Full-dataset psem path coefficients (all_taxa) | H2 DAG table |
+| `DAG_model_fit.csv` | Fisher's C, AIC for the full-dataset psem | H2 DAG table |
+| `SEM_results_database.csv` | Rolling-window path coefficients, all taxa | H2 temporal figure, Shiny |
+| `indirect_effects.csv` | Computed indirect effects per window × taxon | H2 temporal figure, Shiny |
+| `H1_results_database.csv` | Rolling-window H1 estimates, all responses | Shiny app |
 
-The causal model has four structural equations organised in three tiers,
-with `land_use` (0 = unmanaged / A, 1 = managed / C) as the exogenous
-binary driver. The model is **additive** at this stage — no interaction
-terms between `land_use` and the continuous predictors are included.
-This means each path coefficient represents the average slope across
-both management contexts rather than a system-specific estimate.
+## SEM structure (additive, no interactions)
 
-**Tier 1 — land use shapes microclimate** (additive):
-
-$$\text{microclimate}_1 \leftarrow \beta_1 \cdot \text{land\_use}$$
-$$\text{microclimate}_2 \leftarrow \beta_2 \cdot \text{land\_use}$$
-
-**Tier 2 — microclimate drives root:**
-
+$$\text{microclimate}_i \leftarrow \beta_i \cdot \text{land\_use}, \quad i=1,2$$
 $$\text{Root} \leftarrow \beta_3 \cdot \text{mc}_1 + \beta_4 \cdot \text{mc}_2 + \beta_5 \cdot \text{lu}$$
-
-**Tier 3 — microclimate and root drive fauna:**
-
 $$\text{Fauna} \leftarrow \beta_6 \cdot \text{mc}_1 + \beta_7 \cdot \text{mc}_2 + \beta_8 \cdot \text{Root} + \beta_9 \cdot \text{lu}$$
 
-*where mc = microclimate index, lu = land_use.*
+The residual covariance `microclimate_1 %~~% microclimate_2` accounts for
+shared physical drivers beyond land use.
 
-The residual covariance `microclimate_1 %~~% microclimate_2` is modelled
-explicitly because both indices share unmeasured physical drivers
-(radiation, topography) beyond the binary land-use contrast. Without
-this term, piecewiseSEM issues missing-path claims and inflates
-d-separation test statistics.
+## Random structures
 
-Each equation uses a **nested random intercept** (`orientation / depth`)
-and an **AR(1) correlation structure** to account for temporal
-autocorrelation within scanner groups.
+Both depth levels (20 cm and 50 cm) are retained throughout.
 
-**Per-window standardisation.** Transformation and z-score scaling are
-both applied independently within each rolling window, after subsetting
-and dropping incomplete observations. This ensures that standardised
-coefficients reflect within-window variance only, avoiding the confound
-of seasonal and inter-annual variation that a global scaling would
-introduce.
+| Equation | Random structure | Rationale |
+|---|---|---|
+| microclimate ~ land_use | `~ 1 \| depth` | No orientation recorded for sensors |
+| root / fauna ~ … | `~ 1 \| orientation/depth` | Depth nested in orientation |
 
-------------------------------------------------------------------------
+The biological equations fall back to `~ 1 | depth` if the nested structure
+does not converge (e.g. too few levels per group in short windows).
+
+---
 
 ## 1. Setup
 
 ```{r setup}
-#| message: false
-
 invisible(Sys.setlocale("LC_TIME", "C"))
 
 libs <- c(
-  "tidyverse",
-  "lubridate",
-  "piecewiseSEM",
-  "performance",
-  "lme4",
-  "purrr",
-  "nlme",
-  "moments",
-  "car",
-  "jsonlite",
-  "knitr",
-  "kableExtra",
-  "patchwork",    
-  "scales" 
+  "tidyverse", "lubridate", "piecewiseSEM",
+  "purrr", "nlme", "jsonlite",
+  "knitr", "kableExtra"
 )
 invisible(lapply(libs, require, character.only = TRUE))
-```
 
-------------------------------------------------------------------------
-
-## 2. Parameter loading
-
-```{r load-params}
-if (file.exists("../output/model_parameters.txt")) {
-
-  best_params            <- read_json("../output/model_parameters.txt")
-  WIN_DAYS               <- as.numeric(best_params$selected_window)
-  MIN_RATE               <- as.numeric(best_params$selected_min_rate)
-  TRANSFO_ROOT           <- as.character(best_params$transform_root)
-  TRANSFO_FAUNA          <- as.character(best_params$transform_fauna)
-  TRANSFO_MICROCLIMATE_1 <- as.character(best_params$transform_microclimate_1)
-  TRANSFO_MICROCLIMATE_2 <- as.character(best_params$transform_microclimate_2)
-
-} else {
-  WIN_DAYS               <- 14
-  MIN_RATE               <- 0.3
-  TRANSFO_ROOT           <- "sqrt_plus_one"
-  TRANSFO_FAUNA          <- "sqrt_plus_one"
-  TRANSFO_MICROCLIMATE_1 <- "none"
-  TRANSFO_MICROCLIMATE_2 <- "none"
-  warning("Configuration file not found. Using default fallback parameters.")
-}
-
-message(sprintf(
-  paste0("Active config — Window: %d days | Min. rate: %.1f\n",
-         "  Transfo root: %s | Transfo fauna: %s\n",
-         "  Transfo microclimate_1: %s | Transfo microclimate_2: %s"),
-  WIN_DAYS, MIN_RATE,
-  TRANSFO_ROOT, TRANSFO_FAUNA,
-  TRANSFO_MICROCLIMATE_1, TRANSFO_MICROCLIMATE_2
-))
-```
-
-------------------------------------------------------------------------
-
-## 3. Data loading and preprocessing
-
-Transformations are applied globally here (they are element-wise and
-order-independent). Z-score standardisation is deferred to within each
-rolling window — see `run_sem_pipeline()`.
-
-```{r data-preparation}
-
-data_sem_raw <- read.csv("../output/SEM_database.csv",
-                         sep        = ",",
-                         na.strings = c("", "NA")) %>%
-  mutate(
-    position = as.factor(position),
-    depth    = as.factor(depth),
-    # land_use is binary and intentionally excluded from z-scoring throughout.
-    # Keeping it on the 0/1 scale means β_land_use is interpretable as the
-    # average A → C contrast on the standardised response scale.
-    land_use = as.numeric(position == "C"),
-    date     = ymd_hms(date, tz = "UTC"),
-    root     = root_growth_cm2_count_24h
-  )
-
-fauna_vars         <- c("all_taxa", readLines("../output/fauna_vars.txt"))
-microclimate_index <- readLines("../output/microclimate_index.txt")
-
-#' Apply a named variance-stabilising transformation to a numeric vector.
-#'
-#' For `sqrt` and `log`, a minimum shift is applied automatically when the
-#' input contains non-positive values (e.g. negative temperatures, zero
-#' humidity). The shift equals |min(x)| + 0.001, bringing the minimum to
-#' +0.001 before transforming. This preserves the distribution shape while
-#' avoiding NaN / -Inf output. A message is emitted when a shift is applied
-#' so the adjustment is always visible in the render log.
-#'
-#' `hellinger` is window-relative and is handled inside run_sem_pipeline();
-#' this function returns x unchanged for that method.
-#'
-#' @param x      Numeric vector.
-#' @param method One of "none", "sqrt", "sqrt_plus_one", "log", "hellinger".
-#' @param label  Optional label used in the shift message.
-#' @return Transformed numeric vector of the same length.
-apply_transfo <- function(x, method, label = "") {
-
-  shift_if_needed <- function(x, method_name) {
-    x_min <- min(x, na.rm = TRUE)
-    if (x_min <= 0) {
-      shift <- abs(x_min) + 0.001
-      message(sprintf(
-        "  [apply_transfo] shifting '%s' by +%.4f before %s (min was %.4f)",
-        label, shift, method_name, x_min
-      ))
-      x <- x + shift
-    }
-    x
-  }
-
-  switch(method,
-    "sqrt_plus_one" = sqrt(x) + sqrt(x + 1),
-    "sqrt"          = sqrt(shift_if_needed(x, "sqrt")),
-    "log"           = log1p(shift_if_needed(x, "log")),
-    "hellinger"     = x,   # handled per-window inside run_sem_pipeline()
-    x
-  )
-}
-
-# Apply transformations globally (except hellinger, which is window-relative).
-# Scaling is NOT performed here — it happens per window inside run_sem_pipeline().
-# The label argument triggers a message if a shift is needed (negative values).
-data_transformed <- data_sem_raw %>%
-  mutate(root = apply_transfo(root, TRANSFO_ROOT, "root")) %>%
-  mutate(across(
-    all_of(intersect(fauna_vars, names(.))),
-    ~ apply_transfo(., TRANSFO_FAUNA, cur_column())
-  )) %>%
-  mutate(across(
-    all_of(microclimate_index[1]),
-    ~ apply_transfo(., TRANSFO_MICROCLIMATE_1, microclimate_index[1])
-  )) %>%
-  mutate(across(
-    all_of(microclimate_index[2]),
-    ~ apply_transfo(., TRANSFO_MICROCLIMATE_2, microclimate_index[2])
-  ))
-```
-
-------------------------------------------------------------------------
-
-## 4. Analytical functions
-
-### 4.1 Rolling window splitter
-
-```{r rolling-window-generator}
-#' Split a time series into overlapping rolling windows.
-#'
-#' @param df          Dataframe with a `date` column (POSIXct).
-#' @param window_days Integer. Window duration in days.
-#' @param step_days   Integer. Step between consecutive window starts.
-#' @return Named list of dataframes, one per window start date.
-create_rolling_windows <- function(df, window_days, step_days = 1) {
-  start_dates <- seq(
-    min(df$date),
-    max(df$date) - days(window_days) + hours(6),
-    by = paste(step_days, "days")
-  )
-  windows        <- map(start_dates, ~ filter(df, date >= .x & date < .x + days(window_days)))
-  names(windows) <- format(start_dates, "%Y-%m-%d")
-  return(windows)
-}
-```
-
-### 4.2 SEM structure
-
-No interaction terms — each path coefficient is an average across both
-management contexts. `land_use` enters each equation as a main effect
-only, capturing the residual mean difference between A and C after
-conditioning on the continuous predictors.
-
-```{r SEM-structure}
-#' Fit the additive piecewise SEM for a single data window.
-#'
-#' @param data Dataframe (already transformed and z-scored within window)
-#'             with columns: land_use, root, fauna, microclimate_1,
-#'             microclimate_2, orientation, depth.
-#' @return A psem object, or NULL on convergence failure.
-fit_psem <- function(data) {
-  psem(
-
-    lme(microclimate_1 ~ land_use,
-        data        = data,
-        random      = ~ 1 | depth,
-        correlation = corAR1(form = ~ 1 | depth),
-        control     = lmeControl(msMaxIter = 200, opt = "optim")),
-
-    lme(microclimate_2 ~ land_use,
-        data        = data,
-        random      = ~ 1 | depth,
-        correlation = corAR1(form = ~ 1 | depth),
-        control     = lmeControl(msMaxIter = 200, opt = "optim")),
-
-    lme(root ~ microclimate_1 + microclimate_2 + land_use,
-        data        = data,
-        random      = ~ 1 | orientation / depth,
-        correlation = corAR1(form = ~ 1 | orientation / depth),
-        control     = lmeControl(msMaxIter = 200, opt = "optim")),
-
-    lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
-        data        = data,
-        random      = ~ 1 | orientation / depth,
-        correlation = corAR1(form = ~ 1 | orientation / depth),
-        control     = lmeControl(msMaxIter = 200, opt = "optim")),
-
-    microclimate_1 %~~% microclimate_2
-  )
-}
-```
-
-### 4.3 Main pipeline
-
-```{r fixed-pipeline}
-#' Run the full rolling-window SEM pipeline for one taxon variable.
-#'
-#' Within each window the following steps are applied in order:
-#'   1. Subset and drop incomplete rows
-#'   2. Apply hellinger transformation if selected (window-relative)
-#'   3. Z-score standardise all numeric variables except land_use
-#'   4. Fit the piecewise SEM
-#'   5. Extract path coefficients, R², and normalised residuals
-#'
-#' @param taxon_var   Character. Fauna variable column name.
-#' @param data_raw    Dataframe. Transformed (non-hellinger) SEM database.
-#' @param m_indices   Character vector of length 2. Microclimate column names.
-#' @param window_days Integer. Window duration (days).
-#' @param min_rate    Numeric [0,1]. Minimum data completeness ratio.
-#' @return List with two dataframes: `coefficients` and `residuals`.
-run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
-                             window_days, min_rate) {
-
-  cat("\n--- Processing taxon:", taxon_var, "---\n")
-
-  vars_to_scale <- c("fauna", "root", "microclimate_1", "microclimate_2")
-
-  sem_data <- data_raw %>%
-    mutate(
-      fauna          = !!sym(taxon_var),
-      microclimate_1 = !!sym(m_indices[1]),
-      microclimate_2 = !!sym(m_indices[2]),
-      depth          = as.factor(depth)
-    ) %>%
-    select(date, land_use, orientation, depth,
-           fauna, root, microclimate_1, microclimate_2)
-
-  windows    <- create_rolling_windows(sem_data, window_days, step_days = 1)
-  valid_wins <- keep(windows,
-                     ~ (nrow(drop_na(.x)) / (window_days * 16 * 2)) >= min_rate)
-
-  cat(sprintf("  %d / %d windows passed the completeness filter.\n",
-              length(valid_wins), length(windows)))
-
-  if (length(valid_wins) == 0) return(NULL)
-
-  results <- map(names(valid_wins), function(w_name) {
-
-    win_data <- valid_wins[[w_name]] %>%
-      drop_na() %>%
-      arrange(land_use, orientation, depth, date)
-
-    # ── Per-window hellinger (window-relative, applied after subsetting) ─────
-    # Sparsity guard: if more than 80% of fauna values are zero, hellinger is
-    # numerically unstable — a few non-zero observations receive extreme
-    # relative weights after sqrt(x/sum), producing residual outliers.
-    # Such windows carry no reliable faunal signal and are skipped entirely.
-    if (TRANSFO_FAUNA == "hellinger") {
-      if (mean(win_data$fauna == 0, na.rm = TRUE) > 0.8) return(NULL)
-      win_data <- win_data %>%
-        mutate(fauna = sqrt(fauna / sum(fauna, na.rm = TRUE)))
-    }
-
-    # ── Per-window z-score standardisation (land_use excluded) ───────────────
-    win_data <- win_data %>%
-      mutate(across(all_of(vars_to_scale), ~ as.numeric(scale(.))))
-
-    # ── Guards ────────────────────────────────────────────────────────────────
-    # sd() returns NA (not 0) when all values in a column are NA — this can
-    # happen in sparse taxa windows after drop_na(). NA == 0 yields NA,
-    # and if(NA) crashes. The is.na() check catches both cases.
-    stdevs <- sapply(win_data[vars_to_scale], sd, na.rm = TRUE)
-    if (any(is.na(stdevs) | stdevs == 0))            return(NULL)
-    if (length(unique(win_data$land_use)) < 2)        return(NULL)
-    if (any(!is.finite(as.matrix(win_data[vars_to_scale])))) return(NULL)
-
-    # ── Fit SEM ───────────────────────────────────────────────────────────────
-    model <- tryCatch(
-      withCallingHandlers(
-        fit_psem(win_data),
-        warning = function(w) invokeRestart("muffleWarning")
-      ),
-      error = function(e) NULL
-    )
-    if (is.null(model)) return(NULL)
-
-    sm <- tryCatch(summary(model), error = function(e) NULL)
-    if (is.null(sm)) return(NULL)
-
-    # ── Path coefficients ─────────────────────────────────────────────────────
-    coefs  <- as.data.frame(sm$coefficients)
-    r2_raw <- as.data.frame(sm$R2)
-    r2_df  <- r2_raw %>%
-      mutate(
-        r2_cond = .[[grep("R.squared|Conditional", names(.))[1]]],
-        r2_marg = .[[grep("Marginal",              names(.))[1]]]
-      ) %>%
-      select(response = Response, r2_cond, r2_marg)
-
-    coef_df <- tibble(
-      taxon        = taxon_var,
-      date_start   = as.Date(w_name),
-      n_obs        = sm$n,
-      response     = coefs$Response,
-      predictor    = coefs$Predictor,
-      estimate     = coefs$Estimate,
-      std_estimate = coefs$Std.Estimate,
-      p_value      = suppressWarnings(as.numeric(gsub("[^0-9.]", "", coefs$P.Value)))
-    ) %>%
-      left_join(r2_df, by = "response")
-
-    # ── Per-model diagnostic quantities (for check_model-style figures) ─────────
-    # Extracted from each constituent lme independently so cross-equation
-    # convergence failures do not block residual extraction.
-    #
-    # Quantities extracted per observation:
-    #   residual    — normalised residual (divided by within-group SD estimate)
-    #   observed    — response values as seen by the model
-    #   fitted_pop  — population-level prediction (fixed effects only, level = 0)
-    #   fitted_subj — subject-level prediction (fixed + all random effects)
-    #   leverage    — hat value (h_ii); used for influential-observation panel
-    #   cooks_d     — Cook's D approximation: r² × h / (p × (1 − h)²)
-    lme_mods <- keep(model, inherits, "lme")
-
-    resid_df <- map_dfr(lme_mods, function(m) {
-      resp_name <- all.vars(formula(m))[1]
-      res_norm  <- residuals(m, type = "normalized")
-      n_m       <- length(res_norm)
-      fit_pop   <- tryCatch(as.numeric(fitted(m, level = 0)),
-                            error = function(e) rep(NA_real_, n_m))
-      fit_subj  <- tryCatch(as.numeric(fitted(m, level = length(m$groups))),
-                            error = function(e) rep(NA_real_, n_m))
-      obs_vals  <- tryCatch(as.numeric(nlme::getResponse(m)),
-                            error = function(e) rep(NA_real_, n_m))
-      lev       <- tryCatch(as.numeric(hatvalues(m)),
-                            error = function(e) rep(NA_real_, n_m))
-      n_fix     <- length(nlme::fixef(m))
-      cook_d    <- (res_norm^2 * lev) / (n_fix * pmax((1 - lev)^2, 1e-6))
-
-      tibble(
-        taxon       = taxon_var,
-        date_start  = as.Date(w_name),
-        response    = resp_name,
-        observed    = obs_vals,
-        fitted_pop  = fit_pop,
-        fitted_subj = fit_subj,
-        residual    = res_norm,
-        leverage    = lev,
-        cooks_d     = cook_d
-      )
-    })
- # ── VIF per predictor per equation per window ─────────────────────────────
-    # land_use excluded (binary exogenous driver); VIF only meaningful when
-    # there are at least two continuous predictors.
-    vif_df <- map_dfr(lme_mods, function(m) {
-      resp_name  <- all.vars(formula(m))[1]
-      pred_terms <- labels(terms(m))
-      cont_terms <- setdiff(pred_terms, "land_use")
-      if (length(cont_terms) <= 1) return(NULL)
-      tryCatch({
-        f_vif    <- as.formula(paste(resp_name, "~",
-                                     paste(pred_terms, collapse = " + ")))
-        vif_vals <- car::vif(lm(f_vif, data = win_data))
-        tibble(
-          taxon      = taxon_var,
-          date_start = as.Date(w_name),
-          response   = resp_name,
-          predictor  = names(vif_vals),
-          vif        = as.numeric(vif_vals)
-        )
-      }, error = function(e) NULL)
-    })
-
-    list(coefficients = coef_df, residuals = resid_df, vif = vif_df)
-  })
-
-  results <- compact(results)
-  if (length(results) == 0) return(NULL)
-
-  list(
-    coefficients = map_dfr(results, "coefficients"),
-    residuals    = map_dfr(results, "residuals"),
-    vif          = map_dfr(results, "vif")
-  )
-}
-```
-
-------------------------------------------------------------------------
-
-## 5. Model execution
-
-```{r observed-models}
-message(">>> Running observed models across all taxa...")
-
-pipeline_output <- map(
-  fauna_vars,
-  ~ run_sem_pipeline(.x, data_transformed, microclimate_index,
-                     WIN_DAYS, MIN_RATE)
-) %>%
-  compact()
-
-sem_results_raw <- map_dfr(pipeline_output, "coefficients")
-all_residuals   <- map_dfr(pipeline_output, "residuals")
-all_vif         <- map_dfr(pipeline_output, "vif")
-
-message(sprintf("Observed models complete: %d coefficient rows across %d taxa.",
-                nrow(sem_results_raw), n_distinct(sem_results_raw$taxon)))
-```
-
-------------------------------------------------------------------------
-
-## 6. Residual diagnostics
-
-Six assumption checks are shown per equation, mirroring
-`performance::check_model()`. Because the pipeline runs \~500 windows,
-calling `check_model()` on each would be impractical. Instead, all
-windows' diagnostic quantities are pooled, giving a view of assumption
-behaviour across the full temporal range rather than for a single
-window.
-
-| Panel | What to look for |
-|------------------------------------|------------------------------------|
-| Posterior Predictive Check | Blue per-window curves should envelope the green observed density |
-| Linearity | Smoother should track the dashed zero line |
-| Homogeneity of Variance | Smoother should be flat; slope indicates heteroscedasticity |
-| Influential Observations | Most points should lie inside the Cook's D = 0.5 contour |
-| Collinearity | VIF (mean ± SD across windows); red = high (≥ 10) |
-| Normality | Points should follow the diagonal |
-
-```{r fn-check-panels}
-#' Build a 6-panel check_model-style diagnostic figure for one SEM equation.
-#'
-#' All panels are built from the full set of rolling-window model fits pooled
-#' together, so they capture assumption behaviour across the entire time series.
-#'
-#' @param eq_name       Character. Internal response name (matches all_residuals).
-#' @param eq_label      Character. Display label for plot titles.
-#' @param resid_data    Dataframe. all_residuals from run_sem_pipeline().
-#' @param vif_data      Dataframe. all_vif from run_sem_pipeline().
-#' @param n_ppc_windows Integer. Number of windows shown in PPC panel.
-#' @param cook_thresh   Numeric vector. Cook's D contour levels.
-#' @return A patchwork (3 rows x 2 columns).
-make_check_panels <- function(eq_name, eq_label,
-                               resid_data, vif_data,
-                               n_ppc_windows = 80,
-                               cook_thresh   = c(0.5, 1.0)) {
-
-  col_obs  <- "#3d8c40"
-  col_fit  <- "#6b9ac4"
-  col_line <- "#c1603a"
-  base_sz  <- 8
-
-  eq_res <- resid_data %>% filter(response == eq_name, is.finite(residual))
-  eq_vif <- vif_data   %>% filter(response == eq_name)
-
-  n_wins_total <- n_distinct(eq_res$date_start)
-  n_taxa_total <- n_distinct(eq_res$taxon)
-
-  n_fix <- switch(eq_name,
-    microclimate_1 = 2L, microclimate_2 = 2L,
-    root = 4L, fauna = 5L, 2L)
-
-  th <- theme_classic(base_size = base_sz) +
-    theme(
-      panel.border     = element_rect(color = "grey40", fill = NA, linewidth = 0.3),
-      panel.grid.major = element_line(color = "grey94", linewidth = 0.15),
-      axis.title       = element_text(size = base_sz - 1),
-      plot.title       = element_text(face = "bold", size = base_sz,
-                                      margin = margin(b = 1)),
-      plot.subtitle    = element_text(color = "grey50", size = base_sz - 1.5,
-                                      margin = margin(b = 3))
-    )
-
-  # ── 1. Posterior Predictive Check ────────────────────────────────────────
-  # geom_density with group = date_start draws one curve per window (thin blue).
-  # The thick green curve is the overall observed density across all windows.
-  all_wins <- eq_res %>% distinct(date_start) %>% pull(date_start)
-  if (length(all_wins) == 0) return(NULL)  # guard: no data for this equation
-  ppc_wins <- sample(all_wins, min(length(all_wins), n_ppc_windows))
-
-  p1 <- ggplot() +
-    geom_density(
-      data  = eq_res %>% filter(date_start %in% ppc_wins, is.finite(fitted_subj)),
-      aes(x = fitted_subj, group = date_start),
-      color = col_fit, alpha = 0.20, linewidth = 0.25
-    ) +
-    geom_density(
-      data  = eq_res %>% filter(is.finite(observed)),
-      aes(x = observed),
-      color = col_obs, linewidth = 0.9
-    ) +
-    annotate("text", x = -Inf, y = Inf,
-             label    = paste0(length(ppc_wins), " windows shown"),
-             hjust = -0.08, vjust = 1.5, size = 2.2,
-             color = "grey50", fontface = "italic") +
-    labs(title    = "Posterior Predictive Check",
-         subtitle = "Model-predicted lines should resemble observed data line",
-         x = "Value", y = "Density") + th
-
-  # ── 2. Linearity ─────────────────────────────────────────────────────────
-  lin_dat <- eq_res %>% filter(is.finite(fitted_pop))
-  if (nrow(lin_dat) > 25000) lin_dat <- slice_sample(lin_dat, n = 25000)
-
-  p2 <- ggplot(lin_dat, aes(x = fitted_pop, y = residual)) +
-    geom_hline(yintercept = 0, linetype = "dashed",
-               color = "grey60", linewidth = 0.4) +
-    geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
-    geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
-                color = col_line, fill = col_line,
-                alpha = 0.15, linewidth = 0.6) +
-    labs(title    = "Linearity",
-         subtitle = "Reference line should be flat and horizontal",
-         x = "Fitted values", y = "Residuals") + th
-
-  # ── 3. Homogeneity of Variance ───────────────────────────────────────────
-  p3 <- ggplot(lin_dat %>% mutate(sqr = sqrt(abs(residual))),
-               aes(x = fitted_pop, y = sqr)) +
-    geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
-    geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
-                color = col_line, fill = col_line,
-                alpha = 0.15, linewidth = 0.6) +
-    labs(title    = "Homogeneity of Variance",
-         subtitle = "Reference line should be flat and horizontal",
-         x = "Fitted values",
-         y = expression(sqrt("|Std. residuals|"))) + th
-
-  # ── 4. Influential Observations ──────────────────────────────────────────
-  # Cook's D contour: r = ±sqrt(D * p * (1-h)^2 / h)
-  # hatvalues() can fail or return all-NA for single-predictor equations
-  # (e.g. microclimate ~ land_use only). In that case the panel falls back
-  # to a plain residual vs fitted_pop scatter without Cook's D contours.
-  inf_dat <- eq_res %>% filter(is.finite(leverage))
-  if (nrow(inf_dat) > 25000) inf_dat <- slice_sample(inf_dat, n = 25000)
-
-  has_leverage <- nrow(inf_dat) > 0 &&
-                  is.finite(quantile(inf_dat$leverage, 0.995, na.rm = TRUE))
-
-  if (has_leverage) {
-    max_h  <- quantile(inf_dat$leverage, 0.995, na.rm = TRUE)
-    h_seq  <- seq(1e-4, max(max_h * 1.05, 1e-3), length.out = 400)
-    r_clip <- quantile(abs(inf_dat$residual), 0.999, na.rm = TRUE) * 1.5
-
-    cook_lines <- map_dfr(cook_thresh, function(d) {
-      r_val <- sqrt(d * n_fix * (1 - h_seq)^2 / h_seq)
-      bind_rows(
-        tibble(h = h_seq, r =  r_val, level = as.character(d)),
-        tibble(h = h_seq, r = -r_val, level = as.character(d))
-      )
-    }) %>% filter(is.finite(r), abs(r) < r_clip)
-
-    cook_labels <- cook_lines %>%
-      filter(r > 0) %>% group_by(level) %>% slice_max(h, n = 1)
-
-    p4 <- ggplot(inf_dat, aes(x = leverage, y = residual)) +
-      geom_hline(yintercept = 0, linetype = "dashed",
-                 color = "grey60", linewidth = 0.4) +
-      geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
-      geom_line(data = cook_lines,
-                aes(x = h, y = r, group = interaction(level, r > 0)),
-                color = col_line, linewidth = 0.45, linetype = "dashed") +
-      geom_text(data = cook_labels,
-                aes(x = h, y = r, label = level),
-                size = 2.4, color = col_line, hjust = -0.1, vjust = 0) +
-      labs(title    = "Influential Observations",
-           subtitle = "Points should be inside the contour lines",
-           x = "Leverage", y = "Std. Residuals") + th
-
-  } else {
-    # Fallback: leverage unavailable (single binary predictor, nested lme).
-    # Show Cook's D directly on the y-axis instead.
-    cd_dat <- eq_res %>% filter(is.finite(cooks_d), is.finite(fitted_pop))
-    if (nrow(cd_dat) > 25000) cd_dat <- slice_sample(cd_dat, n = 25000)
-
-    p4 <- ggplot(cd_dat, aes(x = fitted_pop, y = cooks_d)) +
-      geom_hline(yintercept = c(0.5, 1.0), linetype = "dashed",
-                 color = col_line, linewidth = 0.35) +
-      geom_point(size = 0.2, alpha = 0.06, color = col_fit) +
-      annotate("text", x = Inf, y = 0.52, label = "0.5",
-               hjust = 1.1, size = 2.4, color = col_line) +
-      annotate("text", x = Inf, y = 1.02, label = "1.0",
-               hjust = 1.1, size = 2.4, color = col_line) +
-      labs(title    = "Influential Observations",
-           subtitle = "Leverage unavailable — showing Cook's D vs fitted",
-           x = "Fitted values (population level)", y = "Cook's D") + th
-  }
-
-  # ── 5. Collinearity ──────────────────────────────────────────────────────
-  if (nrow(eq_vif) == 0) {
-    p5 <- ggplot() +
-      annotate("text", x = 0.5, y = 0.5,
-               label = "Single predictor\n(VIF not applicable)",
-               size = 3.2, color = "grey50", hjust = 0.5, vjust = 0.5) +
-      scale_x_continuous(limits = c(0, 1)) +
-      scale_y_continuous(limits = c(0, 1)) +
-      labs(title = "Collinearity") +
-      th + theme(axis.text  = element_blank(),
-                 axis.ticks = element_blank(),
-                 axis.title = element_blank())
-  } else {
-    vif_summ <- eq_vif %>%
-      group_by(predictor) %>%
-      summarise(mean_vif = mean(vif, na.rm = TRUE),
-                sd_vif   = sd(vif,   na.rm = TRUE),
-                .groups  = "drop") %>%
-      mutate(predictor = fct_reorder(predictor, mean_vif),
-             hi        = mean_vif >= 10)
-
-    p5 <- ggplot(vif_summ, aes(x = mean_vif, y = predictor)) +
-      annotate("rect", xmin = 1,  xmax = 5,   ymin = -Inf, ymax = Inf,
-               fill = "#d4edda", alpha = 0.5) +
-      annotate("rect", xmin = 5,  xmax = 10,  ymin = -Inf, ymax = Inf,
-               fill = "#fff3cd", alpha = 0.5) +
-      annotate("rect", xmin = 10, xmax = Inf, ymin = -Inf, ymax = Inf,
-               fill = "#f8d7da", alpha = 0.5) +
-      geom_vline(xintercept = c(5, 10), linetype = "dashed",
-                 color = "grey50", linewidth = 0.35) +
-      geom_errorbarh(
-        aes(xmin = pmax(mean_vif - sd_vif, 1), xmax = mean_vif + sd_vif),
-        height = 0.3, color = "grey40", linewidth = 0.45
-      ) +
-      geom_point(aes(color = hi), size = 2.8) +
-      scale_color_manual(values = c("FALSE" = "#3d5a3e", "TRUE" = col_line),
-                         guide  = "none") +
-      scale_x_log10(labels = scales::comma) +
-      labs(title    = "Collinearity",
-           subtitle = "High VIF (>= 10) may inflate parameter uncertainty",
-           x = "VIF (log-scaled, mean +/- SD across windows)", y = NULL) + th
-  }
-
-  # ── 6. Normality ─────────────────────────────────────────────────────────
-  qq_dat <- eq_res
-  if (nrow(qq_dat) > 40000) qq_dat <- slice_sample(qq_dat, n = 40000)
-
-  p6 <- ggplot(qq_dat, aes(sample = residual)) +
-    geom_hline(yintercept = c(-2, 2), color = "grey70",
-               linewidth = 0.3, linetype = "dashed") +
-    stat_qq_line(color = col_line, linewidth = 0.55) +
-    stat_qq(size = 0.15, alpha = 0.08, color = col_fit) +
-    labs(title    = "Normality of Residuals",
-         subtitle = "Dots should fall along the line",
-         x        = "Standard Normal Distribution Quantiles",
-         y        = "Sample Quantile Deviations") + th
-
-  # ── Assemble ────────────────────────────────────────────────────────────
-  (p1 | p2) / (p3 | p4) / (p5 | p6) +
-    plot_annotation(
-      title    = paste0("Model diagnostics — equation: ", eq_label),
-      subtitle = sprintf(
-        "Pooled across %d windows x %d taxa  |  n = %s observations",
-        n_wins_total, n_taxa_total,
-        scales::comma(nrow(eq_res))
-      ),
-      theme = theme(
-        plot.title    = element_text(face = "bold", size = 10),
-        plot.subtitle = element_text(color = "grey50", size = 8,
-                                     margin = margin(b = 6))
-      )
-    )
-}
-```
-
-```{r fig-check-model, fig.width = 18, fig.height = 14, out.width = "100%"}
-#| fig-cap: >
-#|   Model assumption diagnostics for each of the four SEM equations, built
-#|   from all rolling-window model fits pooled together. Figures are also
-#|   saved individually as TIFF files for submission.
-
-response_order <- c("microclimate_1", "microclimate_2", "root", "fauna")
-response_labels <- c(
-  microclimate_1 = microclimate_index[1],
-  microclimate_2 = microclimate_index[2],
-  root           = "Root growth",
-  fauna          = "Faunal activity"
-)
-
-check_figs <- imap(response_labels, function(eq_label, eq_name) {
-  make_check_panels(
-    eq_name    = eq_name,
-    eq_label   = eq_label,
-    resid_data = all_residuals,
-    vif_data   = all_vif
-  )
-})
-
-# Display all four figures inline
-walk(check_figs, print)
-
-# Save each equation as a separate TIFF (GCB double-column 175 mm)
-iwalk(check_figs, function(fig, eq_name) {
-  ggsave(
-    filename    = sprintf("../output/Fig_diagnostics_%s.tiff", eq_name),
-    plot        = fig,
-    width       = 17.5, height = 13.5, units = "cm",
-    dpi         = 300,  compression = "lzw"
-  )
-})
-message("Diagnostic figures saved for: ", paste(names(check_figs), collapse = ", "))
-```
-
-```{r}
-#| label: tbl-residual-summary
-#| tbl-cap: >
-#|   Summary statistics for normalised residuals pooled across all
-#|   rolling-window models and taxa. Skewness and kurtosis are computed on
-#|   the full pooled distribution. Prop. |z| > 2: proportion of residuals
-#|   with absolute value exceeding 2 (expected ≈ 5% under normality).
-#|   Values coloured in orange exceed the skewness threshold (|skew| > 1.5).
-
-# Pre-compute stats for clean column_spec colouring (avoids double evaluation)
-resid_stats <- all_residuals %>%
-  filter(response %in% response_order) %>%
-  mutate(response = factor(response,
-                           levels = response_order,
-                           labels = response_labels[response_order])) %>%
-  group_by(response) %>%
-  summarise(
-    n_residuals = n(),
-    mean        = round(mean(residual,                    na.rm = TRUE), 3),
-    sd          = round(sd(residual,                      na.rm = TRUE), 3),
-    skewness    = round(moments::skewness(residual,       na.rm = TRUE), 3),
-    kurtosis    = round(moments::kurtosis(residual,       na.rm = TRUE), 3),
-    prop_out2sd = round(mean(abs(residual) > 2,           na.rm = TRUE), 3),
-    .groups = "drop"
-  )
-
-resid_stats %>%
-  kable(
-    col.names = c("Response", "N residuals", "Mean", "SD",
-                  "Skewness", "Kurtosis", "Prop. |z| > 2"),
-    caption   = "Residual distribution summary by equation (pooled across all windows and taxa)"
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = FALSE, position = "center"
-  ) %>%
-  row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
-  column_spec(5,
-    color = if_else(abs(resid_stats$skewness) > 1.5, "#c1603a", "black"),
-    bold  = if_else(abs(resid_stats$skewness) > 1.5, TRUE,       FALSE)
-  ) %>%
-  column_spec(6,
-    color = if_else(resid_stats$kurtosis > 10, "#c1603a", "black"),
-    bold  = if_else(resid_stats$kurtosis > 10, TRUE,      FALSE)
-  )
-```
-
-------------------------------------------------------------------------
-
-## 7. Consolidation and export
-
-```{r consolidation}
-
-# ── Filter out correlated error terms (~~ rows) ───────────────────────────────
-# piecewiseSEM includes %~~% entries in the coefficient table; they are not
-# directed paths and are excluded from the results database.
-sem_results <- sem_results_raw %>%
-  filter(!str_detect(predictor, "~~")) %>%
-  mutate(path_id = paste(predictor, "\u2192", response))
-
-# ── Placeholder columns for downstream compatibility ─────────────────────────
-# The additive model has no interaction terms, so std_estimate_C equals
-# std_estimate and has_interaction is FALSE throughout. These columns are
-# retained to maintain a consistent schema with the visualisation script,
-# which expects them for the A / C contrast display.
-sem_results <- sem_results %>%
-  mutate(
-    std_estimate_C      = std_estimate,
-    interaction_p_value = NA_real_,
-    has_interaction     = FALSE
-  )
-
-# ── Season labels ─────────────────────────────────────────────────────────────
 season_lookup <- tibble(
   month  = 1:12,
   season = c("Winter", "Winter",
@@ -872,48 +83,775 @@ season_lookup <- tibble(
              "Autumn", "Autumn", "Autumn",
              "Winter")
 )
+```
 
-sem_results <- sem_results %>%
-  mutate(month = month(date_start)) %>%
-  left_join(season_lookup, by = "month")
+---
 
-# ── Export ────────────────────────────────────────────────────────────────────
-write.csv(sem_results,    "../output/SEM_results_database.csv",    row.names = FALSE)
-write.csv(all_residuals,  "../output/SEM_residuals_database.csv",  row.names = FALSE)
+## 2. Parameter loading
+
+```{r load-params}
+# ── Load configuration selected by sem_diagnostic.qmd ────────────────────────
+# fromJSON() auto-simplifies single-element lists to plain vectors — no need
+# for as.character() / as.numeric() unwrapping.
+if (file.exists("../output/model_parameters.txt")) {
+  best_params  <- jsonlite::fromJSON("../output/model_parameters.txt")
+  WIN_DAYS     <- as.integer(best_params$selected_window)
+  MIN_RATE     <- as.numeric(best_params$selected_min_rate)
+  TRANSFO_ROOT <- best_params$transform_root
+  TRANSFO_FAUNA          <- best_params$transform_fauna
+  TRANSFO_MICROCLIMATE_1 <- best_params$transform_microclimate_1
+  TRANSFO_MICROCLIMATE_2 <- best_params$transform_microclimate_2
+} else {
+  WIN_DAYS               <- 14
+  MIN_RATE               <- 0.3
+  TRANSFO_ROOT           <- "sqrt_plus_one"
+  TRANSFO_FAUNA          <- "sqrt_plus_one"
+  TRANSFO_MICROCLIMATE_1 <- "none"
+  TRANSFO_MICROCLIMATE_2 <- "none"
+  warning("model_parameters.txt not found — using hardcoded fallback values.")
+}
 
 message(sprintf(
-  "Export complete: %d coefficient rows | %d taxa | %d paths",
-  nrow(sem_results),
-  n_distinct(sem_results$taxon),
-  n_distinct(sem_results$path_id)
+  "Config | window: %d days | min_rate: %.2f | root: %s | fauna: %s | mc1: %s | mc2: %s",
+  WIN_DAYS, MIN_RATE,
+  TRANSFO_ROOT, TRANSFO_FAUNA,
+  TRANSFO_MICROCLIMATE_1, TRANSFO_MICROCLIMATE_2
 ))
 ```
 
-------------------------------------------------------------------------
+---
 
-## 8. Quick sanity check
+## 3. Data loading and preprocessing
 
-```{r sanity-check-table}
-sem_results %>%
-  filter(response %in% c("root", "fauna")) %>%
-  group_by(taxon, path_id) %>%
-  summarise(
-    n_windows    = n(),
-    mean_beta    = round(mean(std_estimate, na.rm = TRUE), 3),
-    sd_beta      = round(sd(std_estimate,  na.rm = TRUE), 3),
-    prop_sig     = round(mean(p_value < 0.05, na.rm = TRUE), 2),
-    mean_r2_marg = round(mean(r2_marg, na.rm = TRUE), 3),
-    .groups = "drop"
+```{r data-preparation}
+# ── Raw data — all depths retained ───────────────────────────────────────────
+data_sem_raw <- read.csv("../output/SEM_database.csv",
+                         sep = ",", na.strings = c("", "NA")) %>%
+  mutate(
+    position    = as.factor(position),
+    depth       = as.factor(depth),
+    orientation = as.factor(orientation),
+    land_use    = as.numeric(position == "C"),
+    date        = ymd_hms(date, tz = "UTC"),
+    root        = root_growth_cm2_count_24h
+  )
+
+fauna_vars         <- c("all_taxa", readLines("../output/fauna_vars.txt"))
+microclimate_index <- readLines("../output/microclimate_index.txt")
+
+# Windows pre-validated by sem_diagnostic.qmd.
+# NULL = no filter (all completeness-passing windows are used).
+selected_windows <- if (file.exists("../output/selected_windows.txt")) {
+  as.Date(readLines("../output/selected_windows.txt"))
+} else {
+  NULL
+}
+
+message(sprintf(
+  "Data loaded: %d rows | %d taxa | %d orientations | %d depth levels | %s valid windows",
+  nrow(data_sem_raw),
+  length(fauna_vars),
+  n_distinct(data_sem_raw$orientation),
+  n_distinct(data_sem_raw$depth),
+  if (is.null(selected_windows)) "no filter" else as.character(length(selected_windows))
+))
+```
+
+```{r apply-transformations}
+# ── Apply variance-stabilising transformations ────────────────────────────────
+#
+# Transformations are applied ONCE here on the full dataset, before any
+# z-scoring. Z-scoring is always done within each rolling window independently
+# (see run_sem_pipeline) so that standardised coefficients reflect
+# within-window variation rather than global distributional properties.
+#
+# Exception: Hellinger is window-relative (sqrt(x / sum(x))) and cannot be
+# applied globally. It is handled inside run_sem_pipeline().
+
+shift_pos <- function(x, label = "") {
+  x_min <- min(x, na.rm = TRUE)
+  if (!is.na(x_min) && x_min <= 0) {
+    shift <- abs(x_min) + 0.001
+    message(sprintf("  [shift] '%s' shifted by +%.4f", label, shift))
+    x <- x + shift
+  }
+  x
+}
+
+apply_transfo <- function(x, method, label = "") {
+  switch(method,
+    sqrt_plus_one = sqrt(x) + sqrt(x + 1),
+    sqrt          = sqrt(shift_pos(x, label)),
+    log           = log1p(shift_pos(x, label)),
+    hellinger     = x,   # handled per-window
+    x
+  )
+}
+
+data_transformed <- data_sem_raw %>%
+  mutate(root = apply_transfo(root, TRANSFO_ROOT, "root")) %>%
+  mutate(across(all_of(intersect(fauna_vars, names(.))),
+                ~ apply_transfo(., TRANSFO_FAUNA, cur_column()))) %>%
+  mutate(across(all_of(microclimate_index[1]),
+                ~ apply_transfo(., TRANSFO_MICROCLIMATE_1, microclimate_index[1]))) %>%
+  mutate(across(all_of(microclimate_index[2]),
+                ~ apply_transfo(., TRANSFO_MICROCLIMATE_2, microclimate_index[2])))
+```
+
+---
+
+## 4. Shared helper functions
+
+```{r helpers}
+# ── LME controls ──────────────────────────────────────────────────────────────
+lme_ctrl <- nlme::lmeControl(msMaxIter = 200, opt = "optim")
+
+# ── R² for nlme::lme (variance-based, avoids VarCorr matrix parsing) ─────────
+#
+# R²m (marginal)    = var(fixed predictions) / var(observed)
+# R²c (conditional) = var(full predictions)  / var(observed)
+# Both clamped to [0, 1] to absorb numerical noise.
+r2_lme <- function(m) {
+  if (is.null(m)) return(c(R2m = NA_real_, R2c = NA_real_))
+  tryCatch({
+    y   <- as.numeric(nlme::getResponse(m))
+    ss  <- var(y, na.rm = TRUE)
+    if (is.na(ss) || ss == 0) return(c(R2m = NA_real_, R2c = NA_real_))
+    r2m <- var(as.numeric(fitted(m, level = 0)),                na.rm = TRUE) / ss
+    r2c <- var(as.numeric(fitted(m, level = length(m$groups))), na.rm = TRUE) / ss
+    c(R2m = min(max(r2m, 0), 1), R2c = min(max(r2c, 0), 1))
+  }, error = \(e) c(R2m = NA_real_, R2c = NA_real_))
+}
+
+# ── Rolling window splitter ───────────────────────────────────────────────────
+create_rolling_windows <- function(df, window_days, step_days = 1) {
+  starts  <- seq(min(df$date),
+                 max(df$date) - days(window_days) + hours(6),
+                 by = paste(step_days, "days"))
+  windows <- map(starts, ~ filter(df, date >= .x & date < .x + days(window_days)))
+  setNames(windows, format(starts, "%Y-%m-%d"))
+}
+
+# ── Safe LME fitter for rolling-window models ─────────────────────────────────
+#
+# Takes rand_form as an argument and is NOT passed to psem() — safe to use
+# for the rolling-window loop and H1 models.
+# For the full-dataset psem, models must be fitted with LITERAL formulas
+# (see Section 6) because psem::summary() re-evaluates $call for d-sep tests.
+fit_lme_safe <- function(formula, data, rand_form) {
+  tryCatch(
+    withCallingHandlers(
+      nlme::lme(formula, data = data,
+                random      = rand_form,
+                correlation = nlme::corAR1(form = rand_form),
+                control     = lme_ctrl),
+      warning = \(w) invokeRestart("muffleWarning")
+    ),
+    error = \(e) NULL
+  )
+}
+```
+
+---
+
+## 5. H1 — Global land-use effect on faunal activity
+
+```{r h1-global-model}
+# ── Method ────────────────────────────────────────────────────────────────────
+#
+# Fit one LME on the FULL dataset (all_taxa, all depths):
+#   y_trans ~ land_use + (1 | orientation/depth) + AR(1)
+#
+# Extract random-effect-adjusted values:
+#   y_adj = fitted(level = 0) + residuals  =  Xβ̂ + ε̂  =  y − Zb̂
+#
+# This removes orientation/depth grouping noise (Zb̂) while keeping:
+#   - the land_use fixed effect (Xβ̂)
+#   - within-group residual variance (ε̂)
+# Values remain on the transformed scale and are directly comparable between
+# land-use types without the random grouping inflating variance.
+
+h1_model_data <- data_sem_raw %>%
+  select(date, position, orientation, depth, land_use, all_taxa) %>%
+  drop_na() %>%
+  mutate(
+    y_trans        = apply_transfo(all_taxa, TRANSFO_FAUNA, "all_taxa"),
+    position_label = factor(
+      if_else(land_use == 0, "Treed (A)", "Cultivated (C)"),
+      levels = c("Treed (A)", "Cultivated (C)")
+    ),
+    month  = month(as.Date(date)),
+    season = factor(season_lookup$season[month],
+                    levels = c("Spring", "Summer", "Autumn", "Winter"))
+  )
+
+m_h1 <- suppressWarnings(
+  nlme::lme(
+    y_trans ~ land_use,
+    data        = h1_model_data,
+    random      = ~ 1 | orientation / depth,
+    correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
+    control     = lme_ctrl
+  )
+)
+
+# ── Adjusted observations ─────────────────────────────────────────────────────
+h1_adj <- h1_model_data %>%
+  mutate(
+    adj_value      = as.numeric(fitted(m_h1, level = 0)) +
+                     as.numeric(residuals(m_h1)),
+    transformation = TRANSFO_FAUNA
+  )
+
+write.csv(h1_adj, "../output/H1_adjusted_values.csv", row.names = FALSE)
+
+# ── Summary statistics for figure annotation ──────────────────────────────────
+beta_lu  <- as.numeric(nlme::fixef(m_h1)["land_use"])
+sigma_e  <- as.numeric(m_h1$sigma)
+p_lu     <- summary(m_h1)$tTable["land_use", "p-value"]
+
+h1_summary <- tibble(
+  beta_land_use  = beta_lu,
+  se_land_use    = summary(m_h1)$tTable["land_use", "Std.Error"],
+  t_value        = summary(m_h1)$tTable["land_use", "t-value"],
+  p_value        = p_lu,
+  hedges_g       = beta_lu / sigma_e,    # approximate standardised effect size
+  r2_marginal    = as.numeric(r2_lme(m_h1)["R2m"]),
+  r2_conditional = as.numeric(r2_lme(m_h1)["R2c"]),
+  n_obs          = nrow(h1_model_data),
+  transformation = TRANSFO_FAUNA
+)
+
+write.csv(h1_summary, "../output/H1_model_summary.csv", row.names = FALSE)
+
+message(sprintf(
+  "H1 global model — β = %.3f | g = %.2f | p %s | R²m = %.3f",
+  beta_lu,
+  beta_lu / sigma_e,
+  if (p_lu < 0.001) "< 0.001" else sprintf("= %.3f", p_lu),
+  as.numeric(r2_lme(m_h1)["R2m"])
+))
+```
+
+---
+
+## 6. H2a — Full-dataset piecewise SEM (all_taxa, for DAG)
+
+```{r h2a-full-psem}
+# ── Why psem() here, not independent LMEs ────────────────────────────────────
+#
+# psem() wraps four independently fitted LMEs and additionally:
+#   1. Tests d-separation claims (checks whether conditional independencies
+#      implied by the DAG actually hold in the data)
+#   2. Computes Fisher's C and AIC for the whole model
+#   3. Returns standardised path coefficients directly comparable to the
+#      rolling-window estimates in SEM_results_database.csv
+#
+# IMPORTANT — literal random formulas required:
+#   psem::summary() re-evaluates each model's stored $call to refit models
+#   for d-separation tests. If a random formula was passed via a variable
+#   (rand_form), the variable no longer exists at evaluation time and the
+#   call fails with "object not found". All four models below use LITERAL
+#   formula objects so their $call is self-contained.
+
+library(piecewiseSEM)
+
+# ── Prepare full-dataset modelling frame (z-scored globally) ──────────────────
+# Note: z-scoring globally here is appropriate because the full-dataset SEM
+# is not a rolling window — we want coefficients that describe the overall
+# relationship across the entire time series.
+full_data <- data_transformed %>%
+  select(date, land_use, orientation, depth, all_taxa,
+         root, all_of(microclimate_index)) %>%
+  rename(microclimate_1 = microclimate_index[1],
+         microclimate_2 = microclimate_index[2],
+         fauna          = all_taxa) %>%
+  drop_na() %>%
+  mutate(across(c(fauna, root, microclimate_1, microclimate_2),
+                ~ as.numeric(scale(.))))
+
+# ── Fit four LMEs with literal random formulas ────────────────────────────────
+lme_mc1 <- suppressWarnings(tryCatch(
+  nlme::lme(microclimate_1 ~ land_use,
+            data        = full_data,
+            random      = ~ 1 | depth,
+            correlation = nlme::corAR1(form = ~ 1 | depth),
+            control     = lme_ctrl),
+  error = \(e) NULL
+))
+
+lme_mc2 <- suppressWarnings(tryCatch(
+  nlme::lme(microclimate_2 ~ land_use,
+            data        = full_data,
+            random      = ~ 1 | depth,
+            correlation = nlme::corAR1(form = ~ 1 | depth),
+            control     = lme_ctrl),
+  error = \(e) NULL
+))
+
+# Root and fauna: nested random structure, depth-only fallback on convergence failure
+lme_root <- suppressWarnings(tryCatch(
+  nlme::lme(root ~ microclimate_1 + microclimate_2 + land_use,
+            data        = full_data,
+            random      = ~ 1 | orientation / depth,
+            correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
+            control     = lme_ctrl),
+  error = \(e) suppressWarnings(tryCatch(
+    nlme::lme(root ~ microclimate_1 + microclimate_2 + land_use,
+              data        = full_data,
+              random      = ~ 1 | depth,
+              correlation = nlme::corAR1(form = ~ 1 | depth),
+              control     = lme_ctrl),
+    error = \(e2) NULL
+  ))
+))
+
+lme_fauna <- suppressWarnings(tryCatch(
+  nlme::lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
+            data        = full_data,
+            random      = ~ 1 | orientation / depth,
+            correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
+            control     = lme_ctrl),
+  error = \(e) suppressWarnings(tryCatch(
+    nlme::lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
+              data        = full_data,
+              random      = ~ 1 | depth,
+              correlation = nlme::corAR1(form = ~ 1 | depth),
+              control     = lme_ctrl),
+    error = \(e2) NULL
+  ))
+))
+
+# ── Assemble and summarise psem ───────────────────────────────────────────────
+full_psem   <- suppressWarnings(
+  psem(lme_mc1, lme_mc2, lme_root, lme_fauna,
+       microclimate_1 %~~% microclimate_2,
+       data = full_data)
+)
+sem_summary <- summary(full_psem)
+
+# ── Model fit statistics ──────────────────────────────────────────────────────
+dag_fit <- tibble(
+  fishers_C = sem_summary$Cstat$Fisher.C,
+  df        = sem_summary$Cstat$df,
+  p_value   = sem_summary$Cstat$P.Value,
+  AIC       = sem_summary$AIC$AIC,
+  AICc      = sem_summary$AIC$AICc
+)
+write.csv(dag_fit, "../output/DAG_model_fit.csv", row.names = FALSE)
+
+# ── Path coefficients ─────────────────────────────────────────────────────────
+# R² column names vary by piecewiseSEM version — detect them programmatically.
+r2_cols <- names(sem_summary$R2)
+r2_marg_col <- r2_cols[grep("Marginal|R.squared$", r2_cols)[1]]
+r2_cond_col <- r2_cols[grep("Conditional|R.squared.1", r2_cols)[1]]
+
+dag_table <- as.data.frame(sem_summary$coefficients) %>%
+  # piecewiseSEM sometimes returns columns with NA or "" names (separator rows,
+  # unnamed significance columns). Replace them before any dplyr operation.
+  setNames(make.names(names(.), unique = TRUE)) %>%
+  filter(!is.na(Response), Response != "", Response != "~~") %>%
+  transmute(
+    equation     = paste0(Response, " ~ ", Predictor),
+    response     = Response,
+    predictor    = Predictor,
+    estimate     = Estimate,
+    std_estimate = Std.Estimate,
+    se           = Std.Error,
+    t_value      = if ("Crit.Value" %in% names(.)) Crit.Value else NA_real_,
+    p_value      = suppressWarnings(as.numeric(P.Value)),
+    sig          = case_when(
+      p_value < 0.001 ~ "***", p_value < 0.01 ~ "**",
+      p_value < 0.05  ~ "*",   p_value < 0.10 ~ ".", TRUE ~ "")
   ) %>%
-  arrange(taxon, path_id) %>%
-  knitr::kable(
-    caption = "Path summary: mean standardised coefficient across all windows",
-    col.names = c("Taxon", "Path", "N windows",
-                  "Mean β", "SD β", "Prop. sig.", "Mean R² marg.")
+  left_join(
+    as.data.frame(sem_summary$R2) %>%
+      transmute(response       = Response,
+                r2_marginal    = .[[r2_marg_col]],
+                r2_conditional = .[[r2_cond_col]]),
+    by = "response"
+  )
+
+write.csv(dag_table, "../output/DAG_coefficients.csv", row.names = FALSE)
+
+message(sprintf(
+  "Full psem — Fisher's C = %.2f (df = %d, p = %.3f) | AIC = %.1f",
+  dag_fit$fishers_C, dag_fit$df, dag_fit$p_value, dag_fit$AIC
+))
+```
+
+---
+
+## 7. Rolling-window SEMs — all taxa
+
+```{r sem-structure}
+# ── piecewise SEM structure for one rolling window ────────────────────────────
+#
+# Called inside run_sem_pipeline(). Each window is a short time slice;
+# models are fitted with the same literal formula approach as Section 6
+# to keep $call self-contained for psem::summary().
+#
+# Fallback chain for biological equations:
+#   1. ~ 1 | orientation/depth  (preferred — accounts for spatial nesting)
+#   2. ~ 1 | depth              (if nesting fails, e.g. < 2 orientations)
+
+fit_psem_window <- function(data) {
+  lc <- nlme::lmeControl(msMaxIter = 200, opt = "optim")
+
+  safe <- function(expr) {
+    tryCatch(
+      withCallingHandlers(expr, warning = \(w) invokeRestart("muffleWarning")),
+      error = \(e) NULL
+    )
+  }
+
+  m_mc1 <- safe(nlme::lme(microclimate_1 ~ land_use, data = data,
+                           random = ~ 1 | depth,
+                           correlation = nlme::corAR1(form = ~ 1 | depth),
+                           control = lc))
+
+  m_mc2 <- safe(nlme::lme(microclimate_2 ~ land_use, data = data,
+                           random = ~ 1 | depth,
+                           correlation = nlme::corAR1(form = ~ 1 | depth),
+                           control = lc))
+
+  m_root <- safe(nlme::lme(root ~ microclimate_1 + microclimate_2 + land_use,
+                            data = data,
+                            random = ~ 1 | orientation / depth,
+                            correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
+                            control = lc))
+  if (is.null(m_root))
+    m_root <- safe(nlme::lme(root ~ microclimate_1 + microclimate_2 + land_use,
+                              data = data,
+                              random = ~ 1 | depth,
+                              correlation = nlme::corAR1(form = ~ 1 | depth),
+                              control = lc))
+
+  m_fauna <- safe(nlme::lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
+                             data = data,
+                             random = ~ 1 | orientation / depth,
+                             correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
+                             control = lc))
+  if (is.null(m_fauna))
+    m_fauna <- safe(nlme::lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use,
+                               data = data,
+                               random = ~ 1 | depth,
+                               correlation = nlme::corAR1(form = ~ 1 | depth),
+                               control = lc))
+
+  if (any(sapply(list(m_mc1, m_mc2, m_root, m_fauna), is.null))) return(NULL)
+
+  safe(psem(m_mc1, m_mc2, m_root, m_fauna,
+            microclimate_1 %~~% microclimate_2,
+            data = data))
+}
+```
+
+```{r sem-pipeline}
+# ── Rolling-window SEM pipeline for one taxon ─────────────────────────────────
+#
+# Per-window steps:
+#   1. Subset to window dates, drop NAs
+#   2. Apply Hellinger if selected (window-relative, must be done here)
+#   3. Z-score all modelled variables within the window
+#   4. Guard checks (variance, land_use levels, finite values)
+#   5. Fit psem, extract coefficients and R²
+
+run_sem_pipeline <- function(taxon_var, data_raw, m_indices,
+                             window_days, min_rate) {
+  cat("\n--- Taxon:", taxon_var, "---\n")
+
+  vars_to_scale <- c("fauna", "root", "microclimate_1", "microclimate_2")
+
+  sem_data <- data_raw %>%
+    mutate(fauna          = !!sym(taxon_var),
+           microclimate_1 = !!sym(m_indices[1]),
+           microclimate_2 = !!sym(m_indices[2])) %>%
+    select(date, land_use, orientation, depth,
+           fauna, root, microclimate_1, microclimate_2)
+
+  windows <- create_rolling_windows(sem_data, window_days)
+
+  # Completeness = complete rows / total rows (robust to unequal depth sampling)
+  valid_wins <- keep(windows, function(w) {
+    n <- nrow(w); nc <- nrow(drop_na(w))
+    n > 0 && (nc / n) >= min_rate
+  })
+
+  # Restrict to diagnostically pre-validated windows
+  if (!is.null(selected_windows))
+    valid_wins <- valid_wins[as.Date(names(valid_wins)) %in% selected_windows]
+
+  cat(sprintf("  %d / %d windows retained.\n", length(valid_wins), length(windows)))
+  if (length(valid_wins) == 0) return(NULL)
+
+  results <- suppressWarnings(map(names(valid_wins), function(w_name) {
+    win_data <- valid_wins[[w_name]] %>%
+      drop_na() %>%
+      arrange(land_use, orientation, depth, date)
+
+    # Hellinger must be applied per-window (it sums to 1 within the window)
+    if (TRANSFO_FAUNA == "hellinger") {
+      if (mean(win_data$fauna == 0, na.rm = TRUE) > 0.8) return(NULL)
+      win_data <- mutate(win_data,
+                         fauna = sqrt(fauna / sum(fauna, na.rm = TRUE)))
+    }
+
+    win_data <- win_data %>%
+      mutate(across(all_of(vars_to_scale), ~ as.numeric(scale(.))))
+
+    # Guard checks
+    stdevs <- sapply(win_data[vars_to_scale], sd, na.rm = TRUE)
+    if (any(is.na(stdevs) | stdevs == 0))                   return(NULL)
+    if (length(unique(win_data$land_use)) < 2)               return(NULL)
+    if (any(!is.finite(as.matrix(win_data[vars_to_scale])))) return(NULL)
+
+    model <- tryCatch(fit_psem_window(win_data), error = \(e) NULL)
+    if (is.null(model)) return(NULL)
+
+    sm <- tryCatch(summary(model), error = \(e) NULL)
+    if (is.null(sm)) return(NULL)
+
+    coefs <- as.data.frame(sm$coefficients) %>%
+      setNames(make.names(names(.), unique = TRUE)) %>%
+      filter(!is.na(Response), Response != "", Response != "~~")
+
+    # R² — detect column names robustly across piecewiseSEM versions
+    r2_df <- as.data.frame(sm$R2)
+    r2_cols_w <- names(r2_df)
+    r2m_col   <- r2_cols_w[grep("Marginal|R.squared$",   r2_cols_w)[1]]
+    r2c_col   <- r2_cols_w[grep("Conditional|R.squared.1", r2_cols_w)[1]]
+
+    r2_tbl <- r2_df %>%
+      transmute(response = Response,
+                r2_marg  = .[[r2m_col]],
+                r2_cond  = .[[r2c_col]])
+
+    tibble(
+      taxon        = taxon_var,
+      date_start   = as.Date(w_name),
+      n_obs        = sm$n,
+      response     = coefs$Response,
+      predictor    = coefs$Predictor,
+      estimate     = coefs$Estimate,
+      std_estimate = coefs$Std.Estimate,
+      p_value      = suppressWarnings(as.numeric(
+                       gsub("[^0-9.e-]", "", coefs$P.Value)))
+    ) %>%
+      left_join(r2_tbl, by = "response")
+  })) %>% compact()
+
+  if (length(results) == 0) return(NULL)
+  map_dfr(results, ~ .x)
+}
+```
+
+```{r sem-execution}
+# ── Run SEMs for all taxa ──────────────────────────────────────────────────────
+message(">>> Running rolling-window SEMs for all taxa...")
+
+sem_results_raw <- suppressWarnings(
+  map(fauna_vars, ~ run_sem_pipeline(
+    .x, data_transformed, microclimate_index, WIN_DAYS, MIN_RATE
+  )) %>%
+    compact() %>%
+    map_dfr(~ .x)
+)
+
+message(sprintf("SEMs complete: %d coefficient rows across %d taxa.",
+                nrow(sem_results_raw), n_distinct(sem_results_raw$taxon)))
+```
+
+---
+
+## 8. H1 rolling-window models (for Shiny app)
+
+```{r h1-rolling}
+# ── Per-window simple LME: response ~ land_use ────────────────────────────────
+#
+# These are total land-use effects estimated in isolation (not SEM partial
+# effects). Saved for the Shiny app and any rolling-window H1 visualisation.
+# Uses fit_lme_safe() — NOT passed to psem(), so variable rand_form is fine.
+
+fit_h1_windows <- function(response_var, response_group, data_raw,
+                           win_days, min_rate) {
+  # response_group: "microclimate" | "root" | "fauna"
+  # Determines random structure:
+  #   microclimate -> ~ 1 | depth
+  #   root / fauna -> ~ 1 | orientation/depth, fallback ~ 1 | depth
+
+  rand_primary  <- if (response_group == "microclimate") ~ 1 | depth
+                   else ~ 1 | orientation / depth
+  rand_fallback <- ~ 1 | depth
+
+  df <- data_raw %>%
+    mutate(y = !!sym(response_var)) %>%
+    select(date, land_use, orientation, depth, y) %>%
+    drop_na()
+
+  windows <- create_rolling_windows(df, win_days)
+  valid_wins <- keep(windows, function(w) {
+    n <- nrow(w); nc <- nrow(drop_na(w))
+    n > 0 && (nc / n) >= min_rate
+  })
+
+  if (!is.null(selected_windows))
+    valid_wins <- valid_wins[as.Date(names(valid_wins)) %in% selected_windows]
+
+  if (length(valid_wins) == 0) return(NULL)
+
+  map_dfr(names(valid_wins), function(w_name) {
+    wd <- valid_wins[[w_name]] %>%
+      drop_na() %>%
+      arrange(land_use, orientation, depth, date) %>%
+      mutate(y = as.numeric(scale(y)))
+
+    if (is.na(sd(wd$y, na.rm = TRUE)) || sd(wd$y, na.rm = TRUE) == 0) return(NULL)
+    if (length(unique(wd$land_use)) < 2) return(NULL)
+
+    m <- fit_lme_safe(y ~ land_use, wd, rand_primary)
+    if (is.null(m) && response_group != "microclimate")
+      m <- fit_lme_safe(y ~ land_use, wd, rand_fallback)
+    if (is.null(m)) return(NULL)
+
+    tt  <- summary(m)$tTable
+    r2  <- r2_lme(m)
+    phi <- tryCatch(
+      as.numeric(coef(m$modelStruct$corStruct, unconstrained = FALSE)),
+      error = \(e) NA_real_
+    )
+
+    tibble(
+      response       = response_var,
+      response_group = response_group,
+      date_start     = as.Date(w_name),
+      season         = season_lookup$season[month(as.Date(w_name))],
+      n_obs          = nrow(wd),
+      beta_land_use  = tt["land_use", "Value"],
+      se_land_use    = tt["land_use", "Std.Error"],
+      t_value        = tt["land_use", "t-value"],
+      p_value        = tt["land_use", "p-value"],
+      ar1_phi        = phi,
+      r2_marginal    = as.numeric(r2["R2m"]),
+      r2_conditional = as.numeric(r2["R2c"]),
+      delta_r2       = as.numeric(r2["R2c"]) - as.numeric(r2["R2m"])
+    )
+  })
+}
+
+message(">>> Running H1 rolling-window models...")
+
+h1_response_map <- c(
+  setNames(rep("microclimate", 2),            microclimate_index),
+  root_growth_cm2_count_24h = "root",
+  setNames(rep("fauna", length(fauna_vars)),  fauna_vars)
+)
+
+h1_results <- suppressWarnings(
+  imap_dfr(h1_response_map,
+           ~ fit_h1_windows(.y, .x, data_sem_raw, WIN_DAYS, MIN_RATE))
+) %>%
+  mutate(season = factor(season,
+                         levels = c("Spring", "Summer", "Autumn", "Winter")))
+
+message(sprintf("H1 rolling-window complete: %d rows | %d responses",
+                nrow(h1_results), n_distinct(h1_results$response)))
+```
+
+---
+
+## 9. Indirect effect computation
+
+```{r indirect-effects}
+# ── Path-product indirect effects from rolling-window coefficients ─────────────
+#
+# The rolling-window psem provides standardised coefficients (β) per window.
+# Indirect effects are products of the β values along each causal route.
+# These are saved for:
+#   - The H2 temporal figure in results_visualisation.qmd
+#   - The Shiny explorer app
+
+mc1_pred <- microclimate_index[1]
+mc2_pred <- microclimate_index[2]
+mc1_resp <- "microclimate_1"
+mc2_resp <- "microclimate_2"
+
+coefs_wide <- sem_results_raw %>%
+  filter(!str_detect(predictor, "~~"), !is.na(std_estimate)) %>%
+  mutate(coef_id = paste0(predictor, "__", response)) %>%
+  select(taxon, date_start, coef_id, std_estimate) %>%
+  pivot_wider(names_from = coef_id, values_from = std_estimate, values_fn = mean)
+
+# Return column values or NA vector if path absent for a given taxon
+get_col <- \(df, col) if (col %in% names(df)) df[[col]] else rep(NA_real_, nrow(df))
+
+indirect_effects <- coefs_wide %>%
+  mutate(
+    # Keys use internal psem column names (microclimate_1 / microclimate_2),
+    # NOT the actual variable names (mc1_pred / mc2_pred).
+    # coefs_wide is built from sem_results_raw where the data columns were
+    # renamed to microclimate_1/2 before fitting, so the predictor column
+    # in the psem output also carries those internal names.
+    b1 = get_col(., paste0("land_use__", mc1_resp)),  # lu → mc1 (β₁)
+    b2 = get_col(., paste0("land_use__", mc2_resp)),  # lu → mc2 (β₂)
+    b3 = get_col(., paste0(mc1_resp,     "__root")),  # mc1 → root (β₃)
+    b4 = get_col(., paste0(mc2_resp,     "__root")),  # mc2 → root (β₄)
+    b5 = get_col(., "land_use__root"),                # lu → root (β₅)
+    b6 = get_col(., paste0(mc1_resp,     "__fauna")), # mc1 → fauna (β₆)
+    b7 = get_col(., paste0(mc2_resp,     "__fauna")), # mc2 → fauna (β₇)
+    b8 = get_col(., "root__fauna"),                   # root → fauna (β₈)
+    b9 = get_col(., "land_use__fauna"),               # lu → fauna direct (β₉)
+
+    direct         = b9,
+    via_mc1        = b1 * b6,
+    via_mc2        = b2 * b7,
+    via_root       = b5 * b8,
+    via_mc1_root   = b1 * b3 * b8,
+    via_mc2_root   = b2 * b4 * b8,
+    total_indirect = via_mc1 + via_mc2 + via_root + via_mc1_root + via_mc2_root,
+    total_effect   = direct + total_indirect
   ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = TRUE
+  select(taxon, date_start,
+         direct, via_mc1, via_mc2, via_root,
+         via_mc1_root, via_mc2_root, total_indirect, total_effect) %>%
+  mutate(
+    month  = month(as.Date(date_start)),
+    season = case_when(
+      month %in% 3:5  ~ "Spring",
+      month %in% 6:8  ~ "Summer",
+      month %in% 9:11 ~ "Autumn",
+      TRUE            ~ "Winter"
+    )
   ) %>%
-  row_spec(0, bold = TRUE, background = "#f2f2f2")
+  select(-month)
+
+write.csv(indirect_effects, "../output/indirect_effects.csv", row.names = FALSE)
+```
+
+---
+
+## 10. Consolidation and export
+
+```{r export}
+# ── Add season and path_id to SEM results ────────────────────────────────────
+sem_results <- sem_results_raw %>%
+  filter(!str_detect(predictor, "~~")) %>%
+  mutate(
+    path_id = paste(predictor, "\u2192", response),
+    month   = month(date_start)
+  ) %>%
+  left_join(season_lookup, by = "month") %>%
+  mutate(season = factor(season,
+                         levels = c("Spring", "Summer", "Autumn", "Winter")))
+
+write.csv(sem_results, "../output/SEM_results_database.csv", row.names = FALSE)
+write.csv(h1_results,  "../output/H1_results_database.csv",  row.names = FALSE)
+
+message(sprintf(
+  "Export complete:\n  SEM results : %d rows | %d taxa | %d unique paths\n  H1 results  : %d rows | %d responses\n  Indirect eff: %d rows | %d taxa\n  Full psem   : DAG_coefficients.csv + DAG_model_fit.csv\n  H1 global   : H1_adjusted_values.csv + H1_model_summary.csv",
+  nrow(sem_results),      n_distinct(sem_results$taxon),
+  n_distinct(sem_results$path_id),
+  nrow(h1_results),       n_distinct(h1_results$response),
+  nrow(indirect_effects), n_distinct(indirect_effects$taxon)
+))
 ```

@@ -60,9 +60,16 @@ $$\text{Fauna} \leftarrow \beta_6 \cdot \text{mc}_1 + \beta_7 \cdot \text{mc}_2 
 
 *where mc = microclimate index, lu = land_use.*
 
-All equations use a **nested random intercept** (`orientation / depth`) and an
-**AR(1) correlation structure** to account for temporal autocorrelation within
-scanner groups.
+Random structures differ by equation type:
+
+- **Microclimate equations:** `~ 1 | depth` — microclimate sensors have no
+  orientation variable, so depth is the only available grouping factor.
+- **Root and fauna equations:** `~ 1 | orientation/depth` — both orientation
+  and depth are recorded for biological variables, and depth is nested within
+  orientation. Falls back to `~ 1 | depth` on convergence failure.
+  
+All equations include an **AR(1) correlation structure** to account for temporal
+autocorrelation within grouping levels.
 
 ## Sensitivity analysis rationale
 
@@ -81,6 +88,11 @@ independently within each rolling window** after the transformation. This ensure
 that standardised coefficients reflect within-window variation rather than the
 global distribution of the full time series — which would mix seasonal and
 inter-annual variance in an uncontrolled way.
+
+**Completeness criterion:** `min_rate` is the fraction of rows surviving
+`drop_na()` relative to the total rows in the window. This definition is robust
+to unequal sampling densities across depths and variables (e.g. root growth
+measured at only one depth while microclimate is recorded at both).
 
 | Diagnostic | Metric | Threshold |
 |------------------------|------------------------|------------------------|
@@ -117,7 +129,7 @@ invisible(Sys.setlocale("LC_TIME", "C"))
 libs <- c(
   "tidyverse", "lubridate",
   "lme4", "purrr", "nlme", "moments", "car",
-  "knitr", "kableExtra"
+  "knitr", "kableExtra", "patchwork", "scales"
 )
 invisible(lapply(libs, require, character.only = TRUE))
 
@@ -168,19 +180,67 @@ create_rolling_windows <- function(df, window_days, step_days = 1) {
 }
 ```
 
-### 2.2 Independent model fitting
+### 2.2 Per-observation diagnostic extractor
 
-Each structural equation is fitted as a standalone LME, without the piecewise
-SEM wrapper. This approach is appropriate at the diagnostic stage: residuals
-from each equation can be inspected in isolation, and convergence failures in
-one model do not propagate to others. No interaction terms are included here —
-the diagnostic targets the additive structure only.
+```{r fn-extract-diag}
+#' Extract per-observation diagnostic quantities from a fitted lme model.
+#'
+#' Returns a tidy dataframe with one row per observation, carrying the
+#' quantities needed for check_model-style figures (PPC, linearity,
+#' homoscedasticity, influential observations, normality).
+#'
+#' Cook's distance is approximated from normalised residuals and leverage
+#' because nlme does not expose cooks.distance() for lme objects.
+#'
+#' @param m         A fitted nlme::lme object.
+#' @param w_name    Character. Window start date string (used as date_start).
+#' @param resp_name Character. Response variable name (stored in `response`).
+#' @return Tibble with columns: date_start, response, observed, fitted_pop,
+#'         fitted_subj, residual, leverage, cooks_d.
+extract_lme_diag <- function(m, w_name, resp_name) {
+  res_norm <- residuals(m, type = "normalized")
+  n_m      <- length(res_norm)
+  n_fix    <- length(nlme::fixef(m))
+
+  safe <- function(expr) {
+    tryCatch(as.numeric(expr), error = function(e) rep(NA_real_, n_m))
+  }
+
+  lev    <- safe(hatvalues(m))
+  cook_d <- (res_norm^2 * lev) / (n_fix * pmax((1 - lev)^2, 1e-6))
+
+  tibble(
+    date_start  = as.Date(w_name),
+    response    = resp_name,
+    observed    = safe(nlme::getResponse(m)),
+    fitted_pop  = safe(fitted(m, level = 0)),
+    fitted_subj = safe(fitted(m, level = length(m$groups))),
+    residual    = res_norm,
+    leverage    = lev,
+    cooks_d     = cook_d
+  )
+}
+```
+
+### 2.3 Independent model fitting
+
+Each structural equation is fitted as a standalone LME. Random structures differ
+by equation type because microclimate sensors have no `orientation` variable:
+
+- **Microclimate:** `~ 1 | depth` — the only available grouping factor.
+- **Root / fauna:** `~ 1 | orientation/depth` (depth nested within orientation),
+  with automatic fallback to `~ 1 | depth` on convergence failure.
+
+No interaction terms are included — the diagnostic targets the additive structure only.
 
 ```{r fn-fit-models}
 #' Fit the four SEM equations independently as classical LME models
 #'
-#' Each model is fitted separately without the psem() wrapper.
-#' No interaction terms — additive structure only for diagnostics.
+#' Random grouping structures:
+#'   - microclimate_1 / microclimate_2: `~ 1 | depth`
+#'     (microclimate sensors have no orientation variable)
+#'   - root / fauna: `~ 1 | orientation/depth`, falling back to `~ 1 | depth`
+#'     on convergence failure
 #'
 #' @param data Dataframe with columns: `land_use`, `root`, `fauna`,
 #'             `microclimate_1`, `microclimate_2`, `orientation`, `depth`.
@@ -190,13 +250,13 @@ fit_models_independently <- function(data) {
 
   lme_ctrl <- lmeControl(msMaxIter = 200, opt = "optim")
 
-  safe_lme <- function(formula) {
+  attempt <- function(formula, rand_form) {
     tryCatch(
       withCallingHandlers(
         lme(formula,
             data        = data,
-            random      = ~ 1 | orientation / depth,
-            correlation = corAR1(form = ~ 1 | orientation / depth),
+            random      = rand_form,
+            correlation = corAR1(form = rand_form),
             control     = lme_ctrl),
         warning = function(w) invokeRestart("muffleWarning")
       ),
@@ -204,16 +264,32 @@ fit_models_independently <- function(data) {
     )
   }
 
+  # FIX 1: Microclimate sensors have no orientation variable.
+  # Using ~ 1 | orientation/depth would either fail or duplicate values
+  # artificially, inflating the apparent grouping structure.
+  # Depth is the only valid grouping factor for these equations.
+  mc1 <- attempt(microclimate_1 ~ land_use, ~ 1 | depth)
+  mc2 <- attempt(microclimate_2 ~ land_use, ~ 1 | depth)
+
+  # Root and fauna: both orientation and depth are recorded.
+  # Depth is nested within orientation. Falls back to depth-only if nesting
+  # causes convergence failure (e.g. too few levels per group in short windows).
+  fit_bio <- function(formula) {
+    m <- attempt(formula, ~ 1 | orientation / depth)
+    if (is.null(m)) m <- attempt(formula, ~ 1 | depth)
+    m
+  }
+
   list(
-    microclimate_1 = safe_lme(microclimate_1 ~ land_use),
-    microclimate_2 = safe_lme(microclimate_2 ~ land_use),
-    root           = safe_lme(root ~ microclimate_1 + microclimate_2 + land_use),
-    fauna          = safe_lme(fauna ~ microclimate_1 + microclimate_2 + root + land_use)
+    microclimate_1 = mc1,
+    microclimate_2 = mc2,
+    root           = fit_bio(root  ~ microclimate_1 + microclimate_2 + land_use),
+    fauna          = fit_bio(fauna ~ microclimate_1 + microclimate_2 + root + land_use)
   )
 }
 ```
 
-### 2.3 Transformation functions
+### 2.4 Transformation functions
 
 ```{r fn-transforms}
 #' Shift a vector to be strictly positive before a transform that requires x > 0.
@@ -270,7 +346,7 @@ r2_lme <- function(m) {
 }
 ```
 
-### 2.4 Main diagnostic pipeline
+### 2.5 Main diagnostic pipeline
 
 ```{r fn-pipeline}
 #' Run the rolling-window diagnostic pipeline for one taxon variable
@@ -282,6 +358,10 @@ r2_lme <- function(m) {
 #'   4. Fit four LME models independently
 #'   5. Extract residual diagnostics and R² per model
 #'
+#' Completeness is defined as complete rows / total rows in the raw window.
+#' This is robust to unequal sampling densities across depths and variables
+#' (e.g. root growth measured at only one depth while microclimate is at both).
+#'
 #' @param taxon_var   Character. Column name of the fauna variable.
 #' @param data_raw    Dataframe. Full SEM database (raw, untransformed).
 #' @param m_indices   Character vector of length 2. Microclimate index names.
@@ -289,14 +369,16 @@ r2_lme <- function(m) {
 #'                    "log", "hellinger".
 #' @param window_days Integer. Rolling window duration (days).
 #' @param step_days   Integer. Step between window start dates.
-#' @param min_rate    Numeric [0, 1]. Minimum completeness ratio.
+#' @param min_rate    Numeric [0, 1]. Minimum completeness ratio
+#'                    (complete rows / total rows in window).
 #' @param n_windows   Integer or NULL. Random subsample size for benchmarking.
 #' @return Dataframe with one row per model x window, or NULL.
 run_sem_pipeline <- function(taxon_var, data_raw, m_indices, transfo_type,
                              window_days = 14, step_days = 1,
                              min_rate = 0.3, n_windows = NULL) {
 
-  # Rename fauna and microclimate columns to generic names
+  # Rename fauna and microclimate columns to generic names.
+  # depth is retained: it is used as a grouping variable in all LME random effects.
   sem_data <- data_raw %>%
     mutate(
       fauna          = !!sym(taxon_var),
@@ -307,11 +389,24 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices, transfo_type,
     select(date, land_use, orientation, depth,
            fauna, root, microclimate_1, microclimate_2)
 
-  # Split into overlapping windows and retain only sufficiently complete ones
+  # Split into overlapping windows and retain only sufficiently complete ones.
+  # Completeness = complete rows / total rows — does not assume a fixed expected
+  # row count, so it remains valid across different depth × variable combinations.
   windows <- create_rolling_windows(sem_data, window_days, step_days)
 
-  valid_windows <- keep(windows,
-                        ~ (nrow(drop_na(.x)) / (window_days * 16 * 2)) >= min_rate)
+  valid_windows <- keep(windows, function(w) {
+    n_total    <- nrow(w)
+    n_complete <- nrow(drop_na(w))
+    n_total > 0 && (n_complete / n_total) >= min_rate
+  })
+
+  if (length(valid_windows) == 0) {
+    message(sprintf(
+      "  [skip] window=%d min_rate=%.2f transfo=%s — no windows reach %.0f%% completeness.",
+      window_days, min_rate, transfo_type, min_rate * 100
+    ))
+    return(NULL)
+  }
 
   if (!is.null(n_windows) && length(valid_windows) > n_windows) {
     valid_windows <- valid_windows[sample(seq_along(valid_windows), n_windows)]
@@ -347,8 +442,6 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices, transfo_type,
       mutate(across(all_of(vars_to_process), ~ as.numeric(scale(.))))
 
     # ── Guards ────────────────────────────────────────────────────────────────
-    # sd() returns NA (not 0) when all values in a column are NA after drop_na()
-    # (can occur for sparse taxa). is.na() check catches both NA and zero-SD cases.
     stdevs <- sapply(win_data[vars_to_process], sd, na.rm = TRUE)
     if (any(is.na(stdevs) | stdevs == 0)) return(NULL)
     if (length(unique(win_data$land_use)) < 2) return(NULL)
@@ -366,19 +459,13 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices, transfo_type,
       res <- residuals(m, type = "normalized")
       fit <- fitted(m)
 
-      # AR(1) autocorrelation parameter
       phi_val <- tryCatch(
         coef(m$modelStruct$corStruct, unconstrained = FALSE),
         error = function(e) NA_real_
       )
 
-      # R² (marginal = fixed effects only; conditional = fixed + random)
-      # r2_lme() uses manual variance partitioning — avoids the MuMIn matrix
-      # indexing issue where r.squaredGLMM() returns a matrix for lme objects
-      # and named-vector access silently returns NA.
       r2_vals <- r2_lme(m)
 
-      # VIF: computed on continuous predictors only (land_use excluded as binary)
       vif_val <- tryCatch({
         pred_terms <- labels(terms(m))
         cont_terms <- setdiff(pred_terms, "land_use")
@@ -411,6 +498,7 @@ run_sem_pipeline <- function(taxon_var, data_raw, m_indices, transfo_type,
   return(map_dfr(results_list, ~ .x))
 }
 ```
+
 
 ------------------------------------------------------------------------
 
@@ -474,7 +562,7 @@ test_configuration <- function(w_days, m_rate_val, transfo_type,
 
 ### 3.2 Sensitivity grid and execution
 
-```{r benchmarking, cache=TRUE}
+```{r benchmarking}
 sensibility_grid <- expand.grid(
   w_days     = c(5, 7, 10, 14, 21),
   m_rate_val = c(0.1, 0.2, 0.3, 0.4),
@@ -491,9 +579,10 @@ safe_results <- sensibility_grid %>%
     data_sem_raw, fauna_vars[1], microclimate_index
   ))
 
-# Report how many configurations failed (NULL result = no valid windows)
 n_failed <- sum(map_lgl(safe_results, ~ !is.null(.x$error)))
+n_null   <- sum(map_lgl(safe_results, ~ is.null(.x$result)))
 if (n_failed > 0) message(n_failed, " configuration(s) returned an error.")
+if (n_null   > 0) message(n_null,   " configuration(s) returned no usable windows (NULL).")
 
 benchmark_results <- map_dfr(safe_results, "result")
 ```
@@ -502,47 +591,35 @@ benchmark_results <- map_dfr(safe_results, "result")
 
 ## 4. Results
 
-### 4.1 Global optimisation — independent transformation per response variable
-
-The benchmark grid tests one transformation per run, but because diagnostics
-are extracted per equation, each response can be evaluated independently. We
-select the best transformation for each of the four responses separately using
-a lexicographic criterion — validity first, R² second — then find the common
-(window, min_rate) that maximises joint validity across all responses.
+### 4.1 Global optimisation
 
 ```{r global-optimization}
 EXPECTED_RESPONSES <- c("fauna", "root", "microclimate_1", "microclimate_2")
 
-# ── Step 1: per (window, min_rate, response), best transformation ─────────────
 best_per_variable <- benchmark_results %>%
   group_by(window, min_rate, response) %>%
   arrange(desc(prop_valid_models), desc(avg_r2_marginal)) %>%
   slice(1) %>%
   ungroup()
 
-# ── Step 2: best common (window, min_rate) across all four responses ──────────
-# Only include (window, min_rate) pairs where all four responses converged.
-# If any response is missing entirely, transformation[response == "root"] returns
-# character(0) inside summarise(), which crashes or silently drops the row.
-# combined_validity = min across responses so a poor fit in one cannot be masked.
 global_optimization <- best_per_variable %>%
   group_by(window, min_rate) %>%
   filter(all(EXPECTED_RESPONSES %in% response)) %>%
   summarise(
-    combined_validity      = min(prop_valid_models,  na.rm = TRUE),
-    mean_r2                = mean(avg_r2_marginal,   na.rm = TRUE),
+    combined_validity      = min(prop_valid_models, na.rm = TRUE),
+    mean_r2                = mean(avg_r2_marginal,  na.rm = TRUE),
     transfo_root           = transformation[response == "root"],
     transfo_fauna          = transformation[response == "fauna"],
     transfo_microclimate_1 = transformation[response == "microclimate_1"],
     transfo_microclimate_2 = transformation[response == "microclimate_2"],
     .groups = "drop"
   ) %>%
-  # NaN from mean() over all-NA R² — replace with NA so arrange() works cleanly
-  mutate(mean_r2 = ifelse(is.nan(mean_r2), NA_real_, mean_r2)) %>%
-  arrange(desc(combined_validity), desc(mean_r2)) %>%
-  mutate(global_score = combined_validity * mean_r2)
+  mutate(
+    mean_r2      = ifelse(is.nan(mean_r2), NA_real_, mean_r2),
+    global_score = combined_validity * mean_r2
+  ) %>%
+  arrange(desc(combined_validity), desc(mean_r2))
 
-# ── Step 3: display top 5 ─────────────────────────────────────────────────────
 global_optimization %>%
   head(5) %>%
   mutate(across(c(combined_validity, mean_r2, global_score), ~ round(., 3))) %>%
@@ -558,50 +635,20 @@ global_optimization %>%
     "Score"                  = global_score
   ) %>%
   kable(caption = "Top 5 configurations — ranked by validity then R² (lexicographic)") %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = FALSE, position = "center"
-  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, position = "center") %>%
   row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
   row_spec(1, bold = TRUE, background = "#FEC288")
 
-final_selection <- global_optimization %>%
-  slice(1)
+final_selection <- slice(global_optimization, 1)
 ```
 
-------------------------------------------------------------------------
-
-## 4.2 Per-equation performance summary — selected configuration
-
-The table below zooms into the **selected (window, min_rate)** pair and
-shows, for each structural equation independently, the diagnostic
-statistics obtained with its own best transformation. This makes it
-immediately clear which equations drive the joint validity ceiling and
-why.
-
-Colour legend:
-
--   **Validity** — proportion of windows passing all three diagnostic
-    thresholds (heteroscedasticity \< 0.4, \|skewness\| \< 1.5, VIF \<
-    5). Green ≥ 0.7 / orange 0.4–0.69 / red \< 0.4.
--   **Skewness** — mean absolute skewness of normalised residuals across
-    valid windows. Flagged orange when \> 1.5 (threshold exceeded on
-    average).
--   **Heteroscedasticity** — mean Spearman ρ between \|residuals\| and
-    fitted values. Flagged orange when \> 0.4.
--   **R² marginal** — variance explained by fixed effects only. Low
-    values indicate the predictors lack explanatory power beyond random
-    structure. No threshold — shown for context.
--   **ΔR²** — conditional minus marginal R². Large values indicate
-    strong random effects (random structure absorbs most of the
-    variance); small values indicate random structure contributes little.
+### 4.2 Per-equation summary — selected configuration
 
 ```{r per-equation-summary}
-# ── Retrieve the selected (window, min_rate) ──────────────────────────────────
 sel_window   <- final_selection$window
 sel_min_rate <- final_selection$min_rate
 
-# Map of response → its selected transformation (from global_optimization row 1)
 sel_transfo <- c(
   fauna          = final_selection$transfo_fauna,
   root           = final_selection$transfo_root,
@@ -609,18 +656,12 @@ sel_transfo <- c(
   microclimate_2 = final_selection$transfo_microclimate_2
 )
 
-# Pull the matching rows from the full benchmark for each response + its transfo
 per_eq_stats <- imap_dfr(sel_transfo, function(transfo, resp) {
   benchmark_results %>%
-    filter(
-      response       == resp,
-      window         == sel_window,
-      min_rate       == sel_min_rate,
-      transformation == transfo
-    )
+    filter(response == resp, window == sel_window,
+           min_rate == sel_min_rate, transformation == transfo)
 }) %>%
   mutate(
-    # ── Display labels ────────────────────────────────────────────────────────
     response_label = case_match(response,
       "fauna"          ~ "Faunal activity",
       "root"           ~ "Root growth",
@@ -629,132 +670,457 @@ per_eq_stats <- imap_dfr(sel_transfo, function(transfo, resp) {
       .default = response
     )
   ) %>%
-  arrange(match(response,
-                c("fauna", "root", "microclimate_1", "microclimate_2")))
+  arrange(match(response, c("fauna", "root", "microclimate_1", "microclimate_2")))
 
-# ── Pre-extract vectors for column_spec (avoids double evaluation) ────────────
-validity_vals  <- per_eq_stats$prop_valid_models
-skewness_vals  <- abs(per_eq_stats$skewness)
-hetero_vals    <- per_eq_stats$hetero_strength
-r2_vals_marg   <- per_eq_stats$avg_r2_marginal
+validity_vals <- per_eq_stats$prop_valid_models
+skewness_vals <- abs(per_eq_stats$skewness)
+hetero_vals   <- per_eq_stats$hetero_strength
 
 validity_col <- case_when(
   validity_vals >= 0.70 ~ "#2d6a4f",
   validity_vals >= 0.40 ~ "#c1603a",
   TRUE                  ~ "#b00020"
 )
-skewness_col  <- if_else(skewness_vals  > SKEWNESS_THRESHOLD, "#c1603a", "black")
-hetero_col    <- if_else(hetero_vals    > HETERO_THRESHOLD,   "#c1603a", "black")
 
-# ── Render table ──────────────────────────────────────────────────────────────
 per_eq_stats %>%
-  mutate(
-    across(c(prop_valid_models, avg_r2_marginal, avg_r2_conditional,
-             delta_r2, hetero_strength, skewness), ~ round(., 3)),
-    vif_max = round(vif_max, 2)
-  ) %>%
-  select(
-    "Equation"            = response_label,
-    "Transform"           = transformation,
-    "Validity"            = prop_valid_models,
-    "R² marg."            = avg_r2_marginal,
-    "R² cond."            = avg_r2_conditional,
-    "ΔR²"                 = delta_r2,
-    "Skewness"            = skewness,
-    "Heterosced."         = hetero_strength,
-    "VIF max"             = vif_max
-  ) %>%
-  kable(
-    align = c("l", "c", "c", "c", "c", "c", "c", "c", "c")
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = TRUE, position = "center", font_size = 13
-  ) %>%
+  mutate(across(c(prop_valid_models, avg_r2_marginal, avg_r2_conditional,
+                  delta_r2, hetero_strength, skewness), ~ round(., 3)),
+         vif_max = round(vif_max, 2)) %>%
+  select("Equation"    = response_label,
+         "Transform"   = transformation,
+         "Validity"    = prop_valid_models,
+         "R² marg."    = avg_r2_marginal,
+         "R² cond."    = avg_r2_conditional,
+         "ΔR²"         = delta_r2,
+         "Skewness"    = skewness,
+         "Heterosced." = hetero_strength,
+         "VIF max"     = vif_max) %>%
+  kable(align = c("l", "c", "c", "c", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, position = "center", font_size = 13) %>%
   row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
-  column_spec(3,  color = validity_col, bold = TRUE) %>%
-  column_spec(7,  color = skewness_col, bold = skewness_vals > SKEWNESS_THRESHOLD) %>%
-  column_spec(8,  color = hetero_col,   bold = hetero_vals   > HETERO_THRESHOLD) 
+  column_spec(3, color = validity_col, bold = TRUE) %>%
+  column_spec(7, color = if_else(skewness_vals > SKEWNESS_THRESHOLD, "#c1603a", "black"),
+              bold = skewness_vals > SKEWNESS_THRESHOLD) %>%
+  column_spec(8, color = if_else(hetero_vals > HETERO_THRESHOLD, "#c1603a", "black"),
+              bold = hetero_vals > HETERO_THRESHOLD)
 ```
 
-
 ```{r per-equation-barplot}
-#| fig-cap: >
-#|   Proportion of valid windows per equation under the selected configuration.
-#|   The dashed line marks the 0.7 acceptability threshold. Colour encodes the
-#|   dominant diagnostic failure mode when validity < 0.7.
+#| fig-cap: "Proportion of valid windows per equation under the selected configuration."
 #| fig-width: 8
 #| fig-height: 3.5
 
 bar_dat <- per_eq_stats %>%
   mutate(
     failure_mode = case_when(
-      prop_valid_models >= 0.70                    ~ "Acceptable",
-      abs(skewness)     > SKEWNESS_THRESHOLD       ~ "Skewness",
-      hetero_strength   > HETERO_THRESHOLD         ~ "Heteroscedasticity",
-      !is.na(vif_max) & vif_max > VIF_THRESHOLD    ~ "Collinearity",
-      TRUE                                         ~ "Mixed / other"
+      prop_valid_models >= 0.70                 ~ "Acceptable",
+      abs(skewness)   > SKEWNESS_THRESHOLD      ~ "Skewness",
+      hetero_strength > HETERO_THRESHOLD        ~ "Heteroscedasticity",
+      !is.na(vif_max) & vif_max > VIF_THRESHOLD ~ "Collinearity",
+      TRUE                                      ~ "Mixed / other"
     ),
-    response_label = factor(response_label,
-                            levels = rev(response_label))
+    response_label = factor(response_label, levels = rev(response_label))
   )
 
 failure_colours <- c(
-  "Acceptable"        = "#2d6a4f",
-  "Skewness"          = "#6b9ac4",
-  "Heteroscedasticity"= "#c1603a",
-  "Collinearity"      = "#9b5de5",
-  "Mixed / other"     = "#adb5bd"
+  "Acceptable"         = "#2d6a4f",
+  "Skewness"           = "#6b9ac4",
+  "Heteroscedasticity" = "#c1603a",
+  "Collinearity"       = "#9b5de5",
+  "Mixed / other"      = "#adb5bd"
 )
 
-ggplot(bar_dat, aes(x = prop_valid_models, y = response_label,
-                    fill = failure_mode)) +
+ggplot(bar_dat, aes(x = prop_valid_models, y = response_label, fill = failure_mode)) +
   geom_col(width = 0.55, colour = "white", linewidth = 0.3) +
-  geom_vline(xintercept = 0.70, linetype = "dashed",
-             colour = "grey30", linewidth = 0.5) +
+  geom_vline(xintercept = 0.70, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
   geom_text(aes(label = sprintf("%.0f%%", prop_valid_models * 100)),
             hjust = -0.15, size = 3.2, colour = "grey20") +
-  scale_x_continuous(
-    limits = c(0, 1.08),
-    labels = scales::percent_format(accuracy = 1),
-    expand = c(0, 0)
-  ) +
+  scale_x_continuous(limits = c(0, 1.08),
+                     labels = scales::percent_format(accuracy = 1), expand = c(0, 0)) +
   scale_fill_manual(values = failure_colours, name = "Dominant issue") +
-  labs(
-    x = "Proportion of windows passing all diagnostics",
-    y = NULL
-  ) +
+  labs(x = "Proportion of windows passing all diagnostics", y = NULL) +
   theme_classic(base_size = 11) +
-  theme(
-    legend.position  = "right",
-    legend.key.size  = unit(0.4, "cm"),
-    panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3),
-    plot.subtitle    = element_text(colour = "grey50", size = 9)
+  theme(legend.position    = "right",
+        legend.key.size    = unit(0.4, "cm"),
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3))
+```
+
+### 4.3 Window selection — retain only temporally stable windows
+
+For each rolling window under the selected configuration, we fit all four equations independently and compute the proportion that pass all diagnostic thresholds. Only windows where **at least `MIN_VALID_PROP` of equations are valid** are retained for the visual diagnostics and downstream SEM execution. This removes time periods where the model structure is unreliable regardless of which equation is examined.
+
+```{r window-selection}
+# Proportion of equations that must be valid for a window to be retained.
+# With 4 equations, 0.75 = at least 3/4 must pass; 1.0 = all four must pass.
+MIN_VALID_PROP <- 0.75
+
+# FIX 2: was calling run_benchmark_pipeline (wrong name). This version uses
+# run_sem_pipeline throughout — keeping the name consistent here.
+message("Running full window scan under selected configuration...")
+full_diag <- suppressMessages(
+  run_sem_pipeline(
+    taxon_var    = fauna_vars[1],
+    data_raw     = data_sem_raw,
+    m_indices    = microclimate_index,
+    transfo_type = sel_transfo["fauna"],
+    window_days  = sel_window,
+    min_rate     = sel_min_rate,
+    n_windows    = NULL
   )
+)
+
+# Per-window: proportion of equations passing all thresholds
+window_validity <- full_diag %>%
+  mutate(is_ok = abs(hetero_strength) < HETERO_THRESHOLD &
+                 abs(skewness)        < SKEWNESS_THRESHOLD &
+                 (is.na(vif_max) | vif_max < VIF_THRESHOLD)) %>%
+  group_by(model_id) %>%
+  summarise(
+    prop_eq_valid = mean(is_ok, na.rm = TRUE),
+    n_eq          = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # model_id = "taxon_YYYY-MM-DD" — extract date portion
+    date_start   = as.Date(str_extract(model_id, "\\d{4}-\\d{2}-\\d{2}")),
+    window_valid = prop_eq_valid >= MIN_VALID_PROP
+  )
+
+selected_windows <- window_validity %>%
+  filter(window_valid) %>%
+  pull(date_start)
+
+message(sprintf(
+  "Window selection: %d / %d windows retained (>= %.0f%% of equations valid).",
+  length(selected_windows),
+  nrow(window_validity),
+  MIN_VALID_PROP * 100
+))
+
+# Temporal distribution of valid windows
+ggplot(window_validity, aes(x = date_start, y = prop_eq_valid, colour = window_valid)) +
+  geom_point(size = 0.8, alpha = 0.6) +
+  geom_hline(yintercept = MIN_VALID_PROP, linetype = "dashed",
+             colour = "grey30", linewidth = 0.5) +
+  scale_colour_manual(values = c("TRUE" = "#2d6a4f", "FALSE" = "#c1603a"),
+                      labels = c("TRUE" = "Retained", "FALSE" = "Dropped"),
+                      name = NULL) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1)) +
+  labs(x = NULL,
+       y = "Proportion of valid equations per window",
+       title = "Window-level diagnostic validity",
+       subtitle = sprintf("Threshold = %.0f%% | %d windows retained out of %d",
+                          MIN_VALID_PROP * 100,
+                          length(selected_windows),
+                          nrow(window_validity))) +
+  theme_classic(base_size = 11) +
+  theme(legend.position    = "top",
+        panel.grid.major.y = element_line(colour = "grey92", linewidth = 0.3))
 ```
 
 ------------------------------------------------------------------------
 
-## 5. Export
+## 5. Visual diagnostics — selected configuration
 
-### 5.1 Full benchmark results
+```{r fn-check-panels}
+#' Build a 6-panel check_model-style diagnostic figure for one SEM equation.
+#'
+#' @param eq_name       Character. Internal response name.
+#' @param eq_label      Character. Display label for plot titles.
+#' @param resid_data    Dataframe of per-observation diagnostics.
+#' @param vif_data      Dataframe of per-window VIF values.
+#' @param n_ppc_windows Integer. Number of windows shown in PPC panel.
+#' @param cook_thresh   Numeric vector. Cook's D contour levels.
+#' @return A patchwork (3 rows × 2 columns), or NULL if no data.
+make_check_panels <- function(eq_name, eq_label,
+                               resid_data, vif_data,
+                               n_ppc_windows = 80,
+                               cook_thresh   = c(0.5, 1.0)) {
+  col_obs  <- "#3d8c40"
+  col_fit  <- "#6b9ac4"
+  col_line <- "#c1603a"
+  base_sz  <- 8
 
-```{r results-writing}
-write.csv(benchmark_results,
-          "../output/benchmark_results_database.csv",
-          row.names = FALSE,
-          quote     = TRUE)
+  eq_res <- filter(resid_data, response == eq_name, is.finite(residual))
+  eq_vif <- filter(vif_data,   response == eq_name)
+
+  n_wins <- n_distinct(eq_res$date_start)
+  n_fix  <- switch(eq_name, microclimate_1 = 2L, microclimate_2 = 2L,
+                   root = 4L, fauna = 5L, 2L)
+
+  th <- theme_classic(base_size = base_sz) +
+    theme(
+      panel.border     = element_rect(color = "grey40", fill = NA, linewidth = 0.3),
+      panel.grid.major = element_line(color = "grey94", linewidth = 0.15),
+      axis.title       = element_text(size = base_sz - 1),
+      plot.title       = element_text(face = "bold", size = base_sz, margin = margin(b = 1)),
+      plot.subtitle    = element_text(color = "grey50", size = base_sz - 1.5,
+                                      margin = margin(b = 3))
+    )
+
+  all_wins <- distinct(eq_res, date_start)$date_start
+  if (length(all_wins) == 0) return(NULL)
+  ppc_wins <- sample(all_wins, min(length(all_wins), n_ppc_windows))
+
+  ppc_data <- filter(eq_res, date_start %in% ppc_wins, is.finite(fitted_subj))
+  obs_data <- filter(eq_res, is.finite(observed))
+
+  y_data_max <- max(
+    max(density(obs_data$observed)$y),
+    tapply(ppc_data$fitted_subj, ppc_data$date_start,
+           \(x) max(density(x)$y)) |> unlist() |> max()
+  )
+  y_upper <- min(y_data_max * 1.10, 30)
+
+  p1 <- ggplot() +
+    geom_density(data = ppc_data, aes(x = fitted_subj, group = date_start),
+                 color = col_fit, alpha = 0.20, linewidth = 0.25) +
+    geom_density(data = obs_data, aes(x = observed),
+                 color = col_obs, linewidth = 0.9) +
+    annotate("text", x = -Inf, y = Inf,
+             label = paste0(length(ppc_wins), " windows shown"),
+             hjust = -0.08, vjust = 1.5, size = 2.2, color = "grey50", fontface = "italic") +
+    coord_cartesian(ylim = c(0, y_upper)) +
+    labs(title = "Posterior Predictive Check",
+         subtitle = "Model-predicted lines should resemble observed data line",
+         x = "Value", y = "Density") + th
+
+  lin_dat <- eq_res %>% filter(is.finite(fitted_pop)) %>%
+    { if (nrow(.) > 25000) slice_sample(., n = 25000) else . }
+
+  p2 <- ggplot(lin_dat, aes(x = fitted_pop, y = residual)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+    geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
+    geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
+                color = col_line, fill = col_line, alpha = 0.15, linewidth = 0.6) +
+    labs(title = "Linearity", subtitle = "Reference line should be flat and horizontal",
+         x = "Fitted values", y = "Residuals") + th
+
+  p3 <- ggplot(mutate(lin_dat, sqr = sqrt(abs(residual))),
+               aes(x = fitted_pop, y = sqr)) +
+    geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
+    geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
+                color = col_line, fill = col_line, alpha = 0.15, linewidth = 0.6) +
+    labs(title = "Homogeneity of Variance", subtitle = "Reference line should be flat",
+         x = "Fitted values", y = expression(sqrt("|Std. residuals|"))) + th
+
+  inf_dat <- eq_res %>% filter(is.finite(leverage)) %>%
+    { if (nrow(.) > 25000) slice_sample(., n = 25000) else . }
+
+  has_leverage <- nrow(inf_dat) > 0 &&
+    is.finite(quantile(inf_dat$leverage, 0.995, na.rm = TRUE))
+
+  if (has_leverage) {
+    max_h  <- quantile(inf_dat$leverage, 0.995, na.rm = TRUE)
+    h_seq  <- seq(1e-4, max(max_h * 1.05, 1e-3), length.out = 400)
+    r_clip <- quantile(abs(inf_dat$residual), 0.999, na.rm = TRUE) * 1.5
+
+    cook_lines <- map_dfr(cook_thresh, function(d) {
+      r_val <- sqrt(d * n_fix * (1 - h_seq)^2 / h_seq)
+      bind_rows(tibble(h = h_seq, r =  r_val, level = as.character(d)),
+                tibble(h = h_seq, r = -r_val, level = as.character(d)))
+    }) %>% filter(is.finite(r), abs(r) < r_clip)
+
+    cook_labels <- cook_lines %>% filter(r > 0) %>%
+      group_by(level) %>% slice_max(h, n = 1)
+
+    p4 <- ggplot(inf_dat, aes(x = leverage, y = residual)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+      geom_point(size = 0.2, alpha = 0.05, color = col_fit) +
+      geom_line(data = cook_lines,
+                aes(x = h, y = r, group = interaction(level, r > 0)),
+                color = col_line, linewidth = 0.45, linetype = "dashed") +
+      geom_text(data = cook_labels, aes(x = h, y = r, label = level),
+                size = 2.4, color = col_line, hjust = -0.1, vjust = 0) +
+      labs(title = "Influential Observations",
+           subtitle = "Points should be inside the contour lines",
+           x = "Leverage", y = "Std. Residuals") + th
+  } else {
+    cd_dat <- eq_res %>% filter(is.finite(cooks_d), is.finite(fitted_pop)) %>%
+      { if (nrow(.) > 25000) slice_sample(., n = 25000) else . }
+
+    p4 <- ggplot(cd_dat, aes(x = fitted_pop, y = cooks_d)) +
+      geom_hline(yintercept = c(0.5, 1.0), linetype = "dashed",
+                 color = col_line, linewidth = 0.35) +
+      geom_point(size = 0.2, alpha = 0.06, color = col_fit) +
+      annotate("text", x = Inf, y = c(0.52, 1.02), label = c("0.5", "1.0"),
+               hjust = 1.1, size = 2.4, color = col_line) +
+      labs(title = "Influential Observations",
+           subtitle = "Leverage unavailable — showing Cook's D vs fitted",
+           x = "Fitted values (population level)", y = "Cook's D") + th
+  }
+
+  if (nrow(eq_vif) == 0) {
+    p5 <- ggplot() +
+      annotate("text", x = 0.5, y = 0.5,
+               label = "Single predictor\n(VIF not applicable)",
+               size = 3.2, color = "grey50", hjust = 0.5) +
+      scale_x_continuous(limits = c(0, 1)) + scale_y_continuous(limits = c(0, 1)) +
+      labs(title = "Collinearity") +
+      th + theme(axis.text = element_blank(), axis.ticks = element_blank(),
+                 axis.title = element_blank())
+  } else {
+    vif_summ <- eq_vif %>%
+      group_by(predictor) %>%
+      summarise(mean_vif = mean(vif, na.rm = TRUE), sd_vif = sd(vif, na.rm = TRUE),
+                .groups = "drop") %>%
+      mutate(predictor = fct_reorder(predictor, mean_vif), hi = mean_vif >= 10)
+
+    p5 <- ggplot(vif_summ, aes(x = mean_vif, y = predictor)) +
+      annotate("rect", xmin = c(1, 5, 10), xmax = c(5, 10, Inf),
+               ymin = -Inf, ymax = Inf,
+               fill = c("#d4edda", "#fff3cd", "#f8d7da"), alpha = 0.5) +
+      geom_vline(xintercept = c(5, 10), linetype = "dashed",
+                 color = "grey50", linewidth = 0.35) +
+      geom_errorbarh(aes(xmin = pmax(mean_vif - sd_vif, 1), xmax = mean_vif + sd_vif),
+                     height = 0.3, color = "grey40", linewidth = 0.45) +
+      geom_point(aes(color = hi), size = 2.8) +
+      scale_color_manual(values = c("FALSE" = "#3d5a3e", "TRUE" = col_line), guide = "none") +
+      scale_x_log10(labels = scales::comma) +
+      labs(title = "Collinearity",
+           subtitle = "High VIF (>= 10) may inflate parameter uncertainty",
+           x = "VIF (log-scaled, mean +/- SD across windows)", y = NULL) + th
+  }
+
+  qq_dat <- if (nrow(eq_res) > 40000) slice_sample(eq_res, n = 40000) else eq_res
+
+  p6 <- ggplot(qq_dat, aes(sample = residual)) +
+    geom_hline(yintercept = c(-2, 2), color = "grey70", linewidth = 0.3, linetype = "dashed") +
+    stat_qq_line(color = col_line, linewidth = 0.55) +
+    stat_qq(size = 0.15, alpha = 0.08, color = col_fit) +
+    labs(title = "Normality of Residuals", subtitle = "Dots should fall along the line",
+         x = "Standard Normal Quantiles", y = "Sample Quantile Deviations") + th
+
+  (p1 | p2) / (p3 | p4) / (p5 | p6) +
+    plot_annotation(
+      title    = paste0("Model diagnostics — equation: ", eq_label),
+      subtitle = sprintf("Pooled across %d windows  |  n = %s observations",
+                         n_wins, scales::comma(nrow(eq_res))),
+      theme = theme(
+        plot.title    = element_text(face = "bold", size = 10),
+        plot.subtitle = element_text(color = "grey50", size = 8, margin = margin(b = 6))
+      )
+    )
+}
+
 ```
 
-### 5.2 Selected model parameters
+```{r extract-selected-diagnostics}
+#' Re-fit models under the selected configuration on the retained windows
+#' and extract per-observation diagnostics for check_model figures.
+#' Only windows in `selected_windows` (from the window-selection step) are used.
+#'
+#' Uses the same completeness criterion as run_sem_pipeline:
+#' complete rows / total rows >= sel_min_rate.
+extract_selected_diag <- function(resp_name, transfo, data_raw, n_sample = 100) {
+  sem_data <- data_raw %>%
+    mutate(fauna          = !!sym(fauna_vars[1]),
+           microclimate_1 = !!sym(microclimate_index[1]),
+           microclimate_2 = !!sym(microclimate_index[2])) %>%
+    # FIX 3: depth must be retained — it is the grouping variable for microclimate
+    # models and the inner grouping level for root/fauna models.
+    select(date, land_use, orientation, depth,
+           fauna, root, microclimate_1, microclimate_2)
 
-Four separate transform keys are exported, one per response variable.
-`check_models_performance.qmd` reads each key and applies the corresponding
-transformation before z-scoring within each rolling window. The selected
-configuration is row 1 of `global_optimization`, sorted lexicographically
-(highest validity, then highest R²).
+  vars_to_scale <- c("fauna", "root", "microclimate_1", "microclimate_2")
 
-```{r export-parameters}
+  windows <- create_rolling_windows(sem_data, sel_window)
+
+  # Same completeness criterion as run_sem_pipeline.
+  valid_wins <- keep(windows, function(w) {
+    n_total    <- nrow(w)
+    n_complete <- nrow(drop_na(w))
+    n_total > 0 && (n_complete / n_total) >= sel_min_rate
+  })
+
+  # Restrict to windows that passed the equation-level validity filter.
+  valid_wins <- valid_wins[as.Date(names(valid_wins)) %in% selected_windows]
+
+  if (length(valid_wins) == 0) return(NULL)
+  sampled <- valid_wins[sample(seq_along(valid_wins), min(length(valid_wins), n_sample))]
+
+  map_dfr(names(sampled), function(w_name) {
+    win_data <- sampled[[w_name]] %>%
+      drop_na() %>%
+      arrange(land_use, orientation, depth, date) %>%
+      mutate(across(all_of(vars_to_scale), function(x) {
+        switch(transfo,
+          sqrt          = transform_sqrt(x, cur_column()),
+          sqrt_plus_one = transform_ft(x),
+          log           = transform_log(x, cur_column()),
+          hellinger     = transform_hellinger(x),
+          x
+        )
+      })) %>%
+      mutate(across(all_of(vars_to_scale), ~ as.numeric(scale(.))))
+
+    stdevs <- sapply(win_data[vars_to_scale], sd, na.rm = TRUE)
+    if (any(is.na(stdevs) | stdevs == 0))                   return(NULL)
+    if (length(unique(win_data$land_use)) < 2)               return(NULL)
+    if (any(!is.finite(as.matrix(win_data[vars_to_scale])))) return(NULL)
+
+    m <- fit_models_independently(win_data)[[resp_name]]
+    if (is.null(m)) return(NULL)
+    extract_lme_diag(m, w_name, resp_name)
+  })
+}
+
+message("Extracting per-observation diagnostics for selected configuration...")
+selected_resid <- imap_dfr(sel_transfo,
+                            ~ extract_selected_diag(.y, .x, data_sem_raw))
+message(sprintf("Done: %d rows across %d equations",
+                nrow(selected_resid), n_distinct(selected_resid$response)))
+
+# VIF from benchmark results (stored as max per window — used for collinearity panel)
+selected_vif <- imap_dfr(sel_transfo, function(transfo, resp) {
+  benchmark_results %>%
+    filter(response == resp, window == sel_window,
+           min_rate == sel_min_rate, transformation == transfo) %>%
+    transmute(response = resp, predictor = resp, vif = vif_max)
+}) %>% filter(!is.na(vif))
+```
+
+```{r fig-check-model, fig.width=18, fig.height=14, out.width="100%"}
+#| fig-cap: >
+#|   Model assumption diagnostics for each SEM equation under the selected
+#|   configuration (window and transformation from model_parameters.txt).
+
+response_labels <- c(
+  microclimate_1 = microclimate_index[1],
+  microclimate_2 = microclimate_index[2],
+  root           = "Root growth",
+  fauna          = "Faunal activity"
+)
+
+check_figs <- imap(response_labels, ~ make_check_panels(
+  eq_name    = .y,
+  eq_label   = .x,
+  resid_data = selected_resid,
+  vif_data   = selected_vif
+))
+
+walk(check_figs, print)
+
+iwalk(check_figs, ~ ggsave(
+  sprintf("../output/Fig_diagnostics_%s.tiff", .y), plot = .x,
+  width = 17.5, height = 13.5, units = "cm", dpi = 300, compression = "lzw"
+))
+message("Diagnostic figures saved for: ", paste(names(check_figs), collapse = ", "))
+```
+
+------------------------------------------------------------------------
+
+## 6. Export
+
+```{r export}
+write.csv(benchmark_results, "../output/benchmark_results_database.csv",
+          row.names = FALSE, quote = TRUE)
+
+# Selected window dates — read by script 3 to restrict SEM execution
+writeLines(as.character(selected_windows), "../output/selected_windows.txt")
+
 params_to_save <- list(
   selected_window          = final_selection$window,
   selected_min_rate        = final_selection$min_rate,
@@ -764,22 +1130,13 @@ params_to_save <- list(
   transform_microclimate_2 = final_selection$transfo_microclimate_2
 )
 
-jsonlite::write_json(params_to_save,
-                     "../output/model_parameters.txt",
-                     pretty = TRUE)
+jsonlite::write_json(params_to_save, "../output/model_parameters.txt", pretty = TRUE)
 
 message(sprintf(
-  paste0("Best config: window = %d days | min_rate = %.1f\n",
-         "  validity = %.3f | R2 = %.3f | score = %.3f\n",
-         "  root: %s | fauna: %s | mc1: %s | mc2: %s"),
-  as.integer(final_selection$window),
-  final_selection$min_rate,
-  final_selection$combined_validity,
-  final_selection$mean_r2,
-  final_selection$global_score,
-  final_selection$transfo_root,
-  final_selection$transfo_fauna,
-  final_selection$transfo_microclimate_1,
-  final_selection$transfo_microclimate_2
+  "Best config: window = %d days | min_rate = %.1f | validity = %.3f | R2 = %.3f | score = %.3f\n  root: %s | fauna: %s | mc1: %s | mc2: %s",
+  as.integer(final_selection$window), final_selection$min_rate,
+  final_selection$combined_validity, final_selection$mean_r2, final_selection$global_score,
+  final_selection$transfo_root, final_selection$transfo_fauna,
+  final_selection$transfo_microclimate_1, final_selection$transfo_microclimate_2
 ))
 ```
