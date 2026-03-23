@@ -20,48 +20,47 @@ execute:
 
 Third step of the SEM pipeline, following:
 
-1. `data_preparation.qmd` — assembles the SEM database
-2. `sem_diagnostic.qmd` — selects the optimal window, transformation, and
-   valid windows
+1. `data_preparation.qmd` — assembles and quality-controls the SEM database
+2. `sem_diagnostic.qmd` — selects the optimal rolling-window duration,
+   variance-stabilising transformation, and set of diagnostically valid windows
 
 This script performs **all modelling** and writes the result databases that
-`results_visualisation.qmd` reads for tables and figures. No figures are
-produced here.
+`4_results_visualisation.qmd` reads for figures and tables.
+**No figures are produced here** — keeping computation and presentation
+strictly separated makes it easy to re-run the visualisation without
+refitting any model.
 
 ## Outputs produced
 
-| File | Content | Used by |
-|---|---|---|
-| `H1_adjusted_values.csv` | Per-observation RE-adjusted faunal counts | H1 figure |
-| `H1_model_summary.csv` | Fixed-effect estimate, Hedge's g, p-value | H1 figure annotation |
-| `DAG_coefficients.csv` | Full-dataset psem path coefficients (all_taxa) | H2 DAG table |
-| `DAG_model_fit.csv` | Fisher's C, AIC for the full-dataset psem | H2 DAG table |
-| `SEM_results_database.csv` | Rolling-window path coefficients, all taxa | H2 temporal figure, Shiny |
-| `indirect_effects.csv` | Computed indirect effects per window × taxon | H2 temporal figure, Shiny |
-| `H1_results_database.csv` | Rolling-window H1 estimates, all responses | Shiny app |
+| File                       | Content                                        |
+|------------------------|--------------------------------------------|
+| `H1_adjusted_values.csv`   | Per-observation RE-adjusted faunal counts      |
+| `H1_model_summary.csv`     | Fixed-effect estimate, Hedge's g, p-value      |
+| `DAG_coefficients.csv`     | Full-dataset psem path coefficients (all_taxa) |
+| `DAG_model_fit.csv`        | Fisher's C, AIC for the full-dataset psem      |
+| `SEM_results_database.csv` | Rolling-window path coefficients, all taxa     |
+| `indirect_effects.csv`     | Computed indirect effects per window × taxon   |
+| `H1_results_database.csv`  | Rolling-window H1 estimates, all responses     |
 
-## SEM structure (additive, no interactions)
+## SEM structure 
 
-$$\text{microclimate}_i \leftarrow \beta_i \cdot \text{land\_use}, \quad i=1,2$$
-$$\text{Root} \leftarrow \beta_3 \cdot \text{mc}_1 + \beta_4 \cdot \text{mc}_2 + \beta_5 \cdot \text{lu}$$
-$$\text{Fauna} \leftarrow \beta_6 \cdot \text{mc}_1 + \beta_7 \cdot \text{mc}_2 + \beta_8 \cdot \text{Root} + \beta_9 \cdot \text{lu}$$
+$$\text{microclimate}_i \leftarrow \beta_i \cdot \text{land\_use}, \quad i=1,2$$ $$\text{Root} \leftarrow \beta_3 \cdot \text{mc}_1 + \beta_4 \cdot \text{mc}_2 + \beta_5 \cdot \text{lu}$$ $$\text{Fauna} \leftarrow \beta_6 \cdot \text{mc}_1 + \beta_7 \cdot \text{mc}_2 + \beta_8 \cdot \text{Root} + \beta_9 \cdot \text{lu}$$
 
-The residual covariance `microclimate_1 %~~% microclimate_2` accounts for
-shared physical drivers beyond land use.
+The residual covariance `microclimate_1 %~~% microclimate_2` is included
+explicitly in the psem to acknowledge that the two microclimate indices share
+physical drivers beyond land use (e.g. weather events, aspect). Omitting it
+would force any shared variance into the land_use path coefficients.
 
 ## Random structures
 
-Both depth levels (20 cm and 50 cm) are retained throughout.
-
 | Equation | Random structure | Rationale |
-|---|---|---|
-| microclimate ~ land_use | `~ 1 \| depth` | No orientation recorded for sensors |
-| root / fauna ~ … | `~ 1 \| orientation/depth` | Depth nested in orientation |
+|------------------------|------------------------|------------------------|
+| microclimate \~ land_use | `~ 1 \| depth` | No orientation recorded for sensors |
+| root / fauna \~ … | `~ 1 \| orientation/depth` | Depth nested in orientation |
 
-The biological equations fall back to `~ 1 | depth` if the nested structure
-does not converge (e.g. too few levels per group in short windows).
+The biological equations fall back to `~ 1 | depth` if the nested structure does not converge (e.g. too few levels per group in short windows).
 
----
+------------------------------------------------------------------------
 
 ## 1. Setup
 
@@ -85,7 +84,7 @@ season_lookup <- tibble(
 )
 ```
 
----
+------------------------------------------------------------------------
 
 ## 2. Parameter loading
 
@@ -119,7 +118,7 @@ message(sprintf(
 ))
 ```
 
----
+------------------------------------------------------------------------
 
 ## 3. Data loading and preprocessing
 
@@ -198,7 +197,7 @@ data_transformed <- data_sem_raw %>%
                 ~ apply_transfo(., TRANSFO_MICROCLIMATE_2, microclimate_index[2])))
 ```
 
----
+------------------------------------------------------------------------
 
 ## 4. Shared helper functions
 
@@ -252,24 +251,39 @@ fit_lme_safe <- function(formula, data, rand_form) {
 }
 ```
 
----
+------------------------------------------------------------------------
 
-## 5. H1 — Global land-use effect on faunal activity
+## 5. Two-step model: grouping-adjusted land-use effect on faunal activity
 
 ```{r h1-global-model}
 # ── Method ────────────────────────────────────────────────────────────────────
 #
-# Fit one LME on the FULL dataset (all_taxa, all depths):
-#   y_trans ~ land_use + (1 | orientation/depth) + AR(1)
+# The approach is a TWO-STEP sequential modelling procedure that makes the
+# variance partition explicit rather than simultaneous:
 #
-# Extract random-effect-adjusted values:
-#   y_adj = fitted(level = 0) + residuals  =  Xβ̂ + ε̂  =  y − Zb̂
+# STEP 1 — Null model: abundance ~ grouping structure only
+#   y_trans ~ 1 + (1 | orientation/depth) + AR(1)
 #
-# This removes orientation/depth grouping noise (Zb̂) while keeping:
-#   - the land_use fixed effect (Xβ̂)
-#   - within-group residual variance (ε̂)
-# Values remain on the transformed scale and are directly comparable between
-# land-use types without the random grouping inflating variance.
+#   This model contains NO land_use predictor. It estimates only the systematic
+#   variation attributable to:
+#     (a) orientation mean differences (aspect effects — east vs. west face)
+#     (b) depth mean differences within each orientation (stratification of the
+#         soil community at 20 cm vs. 50 cm)
+#     (c) temporal autocorrelation within each orientation/depth group (AR(1))
+#   The residuals of this model are the variation in abundance that cannot be
+#   explained by spatial position or temporal autocorrelation alone.
+#
+# STEP 2 — Land-use test: residuals ~ land_use
+#   residual_step1 ~ land_use
+#
+#   A simple linear model testing whether the residuals from Step 1 differ
+#   systematically between A (treed) and C (cultivated). Because the grouping
+#   structure has already been removed, this test is clean: any A vs. C
+#   difference in the residuals reflects a genuine land-use effect rather than
+#   a confound from spatial position.
+#
+# Effect size: Hedge's g ≈ β_land_use / σ_pooled where σ_pooled is the
+# pooled SD of the Step 1 residuals. Analogous to Cohen's d.
 
 h1_model_data <- data_sem_raw %>%
   select(date, position, orientation, depth, land_use, all_taxa) %>%
@@ -285,9 +299,14 @@ h1_model_data <- data_sem_raw %>%
                     levels = c("Spring", "Summer", "Autumn", "Winter"))
   )
 
-m_h1 <- suppressWarnings(
+# ── Step 1: null model — orientation/depth structure only ─────────────────────
+# Intercept-only fixed effects; random intercepts for orientation and depth
+# capture the spatial grouping. AR(1) removes temporal autocorrelation.
+# land_use is deliberately absent — we want residuals free of land-use signal
+# so that Step 2 can test it independently.
+m_null <- suppressWarnings(
   nlme::lme(
-    y_trans ~ land_use,
+    y_trans ~ 1,
     data        = h1_model_data,
     random      = ~ 1 | orientation / depth,
     correlation = nlme::corAR1(form = ~ 1 | orientation / depth),
@@ -295,65 +314,80 @@ m_h1 <- suppressWarnings(
   )
 )
 
-# ── Adjusted observations ─────────────────────────────────────────────────────
+# Extract residuals from the null model.
+# type = "response" gives raw (unstandardised) residuals on the transformed
+# scale — these are the values shown in the figure and passed to Step 2.
+# Using raw rather than normalised residuals preserves the original units
+# so the y-axis in the figure is directly interpretable.
+h1_resid <- residuals(m_null, type = "response")
+
+# ── Step 2: land-use test on null-model residuals ─────────────────────────────
+# A simple OLS: residuals ~ land_use (0 = A, 1 = C).
+# β_land_use = mean(residuals_C) - mean(residuals_A)
+# This is equivalent to a two-sample t-test but produces a regression output
+# (β, SE, t, p) consistent with the rest of the pipeline's reporting style.
+# lm() rather than lme() is used here because the grouping structure has
+# already been removed by Step 1 — adding it again would overfit.
+m_h1_step2 <- lm(h1_resid ~ h1_model_data$land_use)
+step2_summ  <- summary(m_h1_step2)
+beta_lu     <- coef(m_h1_step2)["h1_model_data$land_use"]
+se_lu       <- step2_summ$coefficients["h1_model_data$land_use", "Std. Error"]
+t_lu        <- step2_summ$coefficients["h1_model_data$land_use", "t value"]
+p_lu        <- step2_summ$coefficients["h1_model_data$land_use", "Pr(>|t|)"]
+
+# Hedge's g: β / pooled SD of residuals
+sigma_pooled <- sd(h1_resid, na.rm = TRUE)
+hedges_g     <- beta_lu / sigma_pooled
+
+# R² from Step 1 null model — proportion of total variance explained by the
+# spatial grouping structure. Large R²c relative to R²m indicates that
+# orientation/depth absorbs most of the explainable variance.
+r2_null <- r2_lme(m_null)
+
+# ── Assemble output data frames ───────────────────────────────────────────────
+# adj_value: Step 1 residuals, used as display values in the H1 figure.
+# These represent abundance after removing orientation/depth effects.
 h1_adj <- h1_model_data %>%
   mutate(
-    adj_value      = as.numeric(fitted(m_h1, level = 0)) +
-                     as.numeric(residuals(m_h1)),
+    adj_value      = as.numeric(h1_resid),
     transformation = TRANSFO_FAUNA
   )
 
 write.csv(h1_adj, "../output/H1_adjusted_values.csv", row.names = FALSE)
 
-# ── Summary statistics for figure annotation ──────────────────────────────────
-beta_lu  <- as.numeric(nlme::fixef(m_h1)["land_use"])
-sigma_e  <- as.numeric(m_h1$sigma)
-p_lu     <- summary(m_h1)$tTable["land_use", "p-value"]
-
 h1_summary <- tibble(
-  beta_land_use  = beta_lu,
-  se_land_use    = summary(m_h1)$tTable["land_use", "Std.Error"],
-  t_value        = summary(m_h1)$tTable["land_use", "t-value"],
-  p_value        = p_lu,
-  hedges_g       = beta_lu / sigma_e,    # approximate standardised effect size
-  r2_marginal    = as.numeric(r2_lme(m_h1)["R2m"]),
-  r2_conditional = as.numeric(r2_lme(m_h1)["R2c"]),
-  n_obs          = nrow(h1_model_data),
-  transformation = TRANSFO_FAUNA
+  beta_land_use    = beta_lu,
+  se_land_use      = se_lu,
+  t_value          = t_lu,
+  p_value          = p_lu,
+  hedges_g         = hedges_g,
+  # R² from the null model (Step 1) — describes how much variance is
+  # explained by the spatial grouping, not by land_use.
+  r2_null_marginal    = as.numeric(r2_null["R2m"]),
+  r2_null_conditional = as.numeric(r2_null["R2c"]),
+  # R² from Step 2 — proportion of residual variance explained by land_use.
+  r2_step2         = step2_summ$r.squared,
+  n_obs            = nrow(h1_model_data),
+  transformation   = TRANSFO_FAUNA
 )
 
 write.csv(h1_summary, "../output/H1_model_summary.csv", row.names = FALSE)
 
 message(sprintf(
-  "H1 global model — β = %.3f | g = %.2f | p %s | R²m = %.3f",
+  "H1 two-step model | Step2: β = %.3f | g = %.2f | p %s | R²(land_use) = %.3f | R²c(null) = %.3f",
   beta_lu,
-  beta_lu / sigma_e,
+  hedges_g,
   if (p_lu < 0.001) "< 0.001" else sprintf("= %.3f", p_lu),
-  as.numeric(r2_lme(m_h1)["R2m"])
+  step2_summ$r.squared,
+  as.numeric(r2_null["R2c"])
 ))
 ```
 
----
+------------------------------------------------------------------------
 
-## 6. H2a — Full-dataset piecewise SEM (all_taxa, for DAG)
+## 6. Full-dataset piecewise SEM
 
 ```{r h2a-full-psem}
-# ── Why psem() here, not independent LMEs ────────────────────────────────────
-#
-# psem() wraps four independently fitted LMEs and additionally:
-#   1. Tests d-separation claims (checks whether conditional independencies
-#      implied by the DAG actually hold in the data)
-#   2. Computes Fisher's C and AIC for the whole model
-#   3. Returns standardised path coefficients directly comparable to the
-#      rolling-window estimates in SEM_results_database.csv
-#
-# IMPORTANT — literal random formulas required:
-#   psem::summary() re-evaluates each model's stored $call to refit models
-#   for d-separation tests. If a random formula was passed via a variable
-#   (rand_form), the variable no longer exists at evaluation time and the
-#   call fails with "object not found". All four models below use LITERAL
-#   formula objects so their $call is self-contained.
-
 library(piecewiseSEM)
 
 # ── Prepare full-dataset modelling frame (z-scored globally) ──────────────────
@@ -447,8 +481,6 @@ r2_marg_col <- r2_cols[grep("Marginal|R.squared$", r2_cols)[1]]
 r2_cond_col <- r2_cols[grep("Conditional|R.squared.1", r2_cols)[1]]
 
 dag_table <- as.data.frame(sem_summary$coefficients) %>%
-  # piecewiseSEM sometimes returns columns with NA or "" names (separator rows,
-  # unnamed significance columns). Replace them before any dplyr operation.
   setNames(make.names(names(.), unique = TRUE)) %>%
   filter(!is.na(Response), Response != "", Response != "~~") %>%
   transmute(
@@ -480,9 +512,9 @@ message(sprintf(
 ))
 ```
 
----
+------------------------------------------------------------------------
 
-## 7. Rolling-window SEMs — all taxa
+## 7. Rolling-window SEMs
 
 ```{r sem-structure}
 # ── piecewise SEM structure for one rolling window ────────────────────────────
@@ -662,9 +694,9 @@ message(sprintf("SEMs complete: %d coefficient rows across %d taxa.",
                 nrow(sem_results_raw), n_distinct(sem_results_raw$taxon)))
 ```
 
----
+------------------------------------------------------------------------
 
-## 8. H1 rolling-window models (for Shiny app)
+## 8. Rolling-window models
 
 ```{r h1-rolling}
 # ── Per-window simple LME: response ~ land_use ────────────────────────────────
@@ -758,7 +790,7 @@ message(sprintf("H1 rolling-window complete: %d rows | %d responses",
                 nrow(h1_results), n_distinct(h1_results$response)))
 ```
 
----
+------------------------------------------------------------------------
 
 ## 9. Indirect effect computation
 
@@ -767,9 +799,6 @@ message(sprintf("H1 rolling-window complete: %d rows | %d responses",
 #
 # The rolling-window psem provides standardised coefficients (β) per window.
 # Indirect effects are products of the β values along each causal route.
-# These are saved for:
-#   - The H2 temporal figure in results_visualisation.qmd
-#   - The Shiny explorer app
 
 mc1_pred <- microclimate_index[1]
 mc2_pred <- microclimate_index[2]
@@ -828,7 +857,7 @@ indirect_effects <- coefs_wide %>%
 write.csv(indirect_effects, "../output/indirect_effects.csv", row.names = FALSE)
 ```
 
----
+------------------------------------------------------------------------
 
 ## 10. Consolidation and export
 
