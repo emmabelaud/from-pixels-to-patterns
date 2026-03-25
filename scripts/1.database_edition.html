@@ -4487,7 +4487,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-27"><a href="#cb22-27" aria-hidden="true" tabindex="-1"></a><span class="fu">### What this script produces</span></span>
 <span id="cb22-28"><a href="#cb22-28" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-29"><a href="#cb22-29" aria-hidden="true" tabindex="-1"></a>| Output | File | Description |</span>
-<span id="cb22-30"><a href="#cb22-30" aria-hidden="true" tabindex="-1"></a>|------------------------|------------------------|------------------------|</span>
+<span id="cb22-30"><a href="#cb22-30" aria-hidden="true" tabindex="-1"></a>|----|----|----|</span>
 <span id="cb22-31"><a href="#cb22-31" aria-hidden="true" tabindex="-1"></a>| Main SEM database | <span class="in">`SEM_database.csv`</span> | One row per scanner × 6-hour time step, with fauna counts, environmental variables, root metrics, and season labels |</span>
 <span id="cb22-32"><a href="#cb22-32" aria-hidden="true" tabindex="-1"></a>| Taxa list | <span class="in">`fauna_vars.txt`</span> | Names of invertebrate taxa retained for modelling (≥ 8 % of total observations) |</span>
 <span id="cb22-33"><a href="#cb22-33" aria-hidden="true" tabindex="-1"></a>| Microclimate indices | <span class="in">`microclimate_index.txt`</span> | The two most informative and orthogonal microclimatic summary variables, selected by PCA |</span>
@@ -4497,7 +4497,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-37"><a href="#cb22-37" aria-hidden="true" tabindex="-1"></a>Five data streams are integrated:</span>
 <span id="cb22-38"><a href="#cb22-38" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-39"><a href="#cb22-39" aria-hidden="true" tabindex="-1"></a>| Step | Source | Key processing |</span>
-<span id="cb22-40"><a href="#cb22-40" aria-hidden="true" tabindex="-1"></a>|------------------------|------------------------|------------------------|</span>
+<span id="cb22-40"><a href="#cb22-40" aria-hidden="true" tabindex="-1"></a>|----|----|----|</span>
 <span id="cb22-41"><a href="#cb22-41" aria-hidden="true" tabindex="-1"></a>| **1. Fauna detections** | In-situ scanners images | Filter to 6-hour scan times; recode fine taxa to higher taxonomic levels; fill unobserved taxon–date combinations with 0 (absent) vs. NA (missing image) |</span>
 <span id="cb22-42"><a href="#cb22-42" aria-hidden="true" tabindex="-1"></a>| **2. Soil probes** | DIAMS sensors | Join by date × depth × position |</span>
 <span id="cb22-43"><a href="#cb22-43" aria-hidden="true" tabindex="-1"></a>| **3. Air probes** | DIAMS sensors | Join by date × position |</span>
@@ -4883,7 +4883,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-423"><a href="#cb22-423" aria-hidden="true" tabindex="-1"></a>Following Grooss et al. (in prep.), five indices summarise each environmental variable over the rolling window:</span>
 <span id="cb22-424"><a href="#cb22-424" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-425"><a href="#cb22-425" aria-hidden="true" tabindex="-1"></a>| Index | Description |</span>
-<span id="cb22-426"><a href="#cb22-426" aria-hidden="true" tabindex="-1"></a>|------------------------------------|------------------------------------|</span>
+<span id="cb22-426"><a href="#cb22-426" aria-hidden="true" tabindex="-1"></a>|----|----|</span>
 <span id="cb22-427"><a href="#cb22-427" aria-hidden="true" tabindex="-1"></a>| <span class="in">`median`</span> | Central tendency, robust to extremes |</span>
 <span id="cb22-428"><a href="#cb22-428" aria-hidden="true" tabindex="-1"></a>| <span class="in">`amplitude`</span> | 5th–95th percentile range (within-window variability) |</span>
 <span id="cb22-429"><a href="#cb22-429" aria-hidden="true" tabindex="-1"></a>| <span class="in">`change_ratio`</span> | Median of successive differences (instantaneous variability) |</span>
