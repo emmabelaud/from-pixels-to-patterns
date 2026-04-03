@@ -814,8 +814,8 @@ h3_win_raw <- bind_rows(h3_direct_win, h3_indirect_win) %>%
   )
 
 comm_beta_win <- h3_win_raw %>%
-  filter(taxon == "all_taxa", path_id == "direct") %>%
-  select(date_start, community_beta = std_estimate)
+  filter(taxon == "all_taxa") %>%
+  select(path_id, date_start, community_beta = std_estimate)
 
 h3_taxa_win <- h3_win_raw %>%
   filter(taxon != "all_taxa")
@@ -862,7 +862,7 @@ h3_win_pairs <- h3_taxa_win %>%
   group_by(path_id, date_start, season) %>%
   group_modify(~ compute_win_pairs(.x)) %>%
   ungroup() %>%
-  left_join(comm_beta_win, by = "date_start") %>%
+  left_join(comm_beta_win, by = c("path_id", "date_start")) %>%
   mutate(
     abs_forcing = abs(community_beta),
     pair_label  = paste(pmin(taxon_a, taxon_b),
@@ -989,6 +989,140 @@ mixed_stats <- mixed_fits %>%
   select(-tbl)
 ```
 
+### Permutation
+```{r}
+# ─────────────────────────────────────────────────────────────────────────────
+# H3 — WINDOW-LEVEL PERMUTATION TEST
+#
+# Null hypothesis: there is no relationship between community forcing strength
+# and inter-taxon pairwise distance, beyond what arises from the temporal
+# autocorrelation structure and pair-specific baseline divergence levels.
+#
+# Permutation strategy:
+#   For each replicate, the mapping between windows and their abs_forcing values
+#   is shuffled — i.e. window labels are permuted while all pair observations
+#   within each window remain together. This breaks the forcing–distance link
+#   while preserving:
+#     (a) the within-window pair structure (all pairs still share the same
+#         forcing value within a permuted window),
+#     (b) the temporal ordering of actual distance values (pairs still follow
+#         their true seasonal trajectory; only the forcing axis is scrambled).
+#
+#   A simpler row-level permutation would be anti-conservative because it would
+#   destroy the AR(1) structure and produce a null distribution with more
+#   variance than the true null.
+#
+# For each permutation, only the OLS slope is extracted (not the full mixed
+# model) to keep runtime tractable. OLS and LME slopes estimate the same
+# quantity under H0 (no forcing effect), so the OLS permutation distribution
+# is a valid reference for testing the LME slope.
+#
+# n_perm: 999 permutations give a minimum achievable p-value of 0.001.
+#         Increase to 4999 for publication if runtime permits.
+# ─────────────────────────────────────────────────────────────────────────────
+
+n_perm <- 999
+set.seed(2025)   # reproducibility
+
+# ── Build a window-level forcing lookup (one row per window) ──────────────────
+# This is what gets permuted: the date_start → abs_forcing mapping.
+window_forcing <- h3_model_data %>%
+  distinct(date_start, abs_forcing)
+
+#' Run one permutation for a single pathway slice
+#'
+#' @param df        Pathway-specific slice with columns dist, date_start.
+#' @param win_tbl   The window_forcing lookup table (will be shuffled).
+#' @return          OLS slope on the permuted abs_forcing.
+one_perm <- function(df, win_tbl) {
+  # Shuffle the forcing values across windows (row permutation of win_tbl)
+  shuffled <- win_tbl %>%
+    mutate(abs_forcing = sample(abs_forcing))
+
+  df_perm <- df %>%
+    select(-abs_forcing) %>%
+    left_join(shuffled, by = "date_start")
+
+  coef(lm(dist ~ abs_forcing, data = df_perm))[2]
+}
+
+# ── Run permutations per pathway ──────────────────────────────────────────────
+# Progress is printed to the console; suppress with invisible() if running
+# inside a non-interactive render.
+perm_results <- h3_model_data %>%
+  group_by(path_id) %>%
+  group_modify(function(df, key) {
+    message("Permuting pathway: ", key$path_id)
+    
+    # 1. Create a simple mapping of date to forcing for THIS pathway
+    win_map <- df %>% distinct(date_start, abs_forcing)
+    
+    # 2. Extract the actual distance and date column to avoid repeated df manipulation
+    # We use match() to link dates to their shuffled forcing values extremely fast
+    date_indices <- match(df$date_start, win_map$date_start)
+    dist_vals <- df$dist
+    forcing_vals <- win_map$abs_forcing
+    
+    null_slopes <- replicate(n_perm, {
+      # Shuffle only the small vector of forcing values
+      shuffled_forcing <- sample(forcing_vals)
+      # Map them back to the long 'dist' vector
+      perm_forcing <- shuffled_forcing[date_indices]
+      # Fast linear model (returns only the slope)
+      coef(lm.fit(cbind(1, perm_forcing), dist_vals))[2]
+    })
+    
+    tibble(null_slopes = list(null_slopes))
+  }) %>%
+  ungroup()
+
+# ── Compute permutation p-values ──────────────────────────────────────────────
+# Two-sided: proportion of |null slope| ≥ |observed slope|.
+# The observed slope comes from the LME fit (mixed_stats), not a plain OLS,
+# but both estimate the same quantity under H0 so the comparison is valid.
+perm_stats <- perm_results %>%
+  left_join(select(mixed_stats, path_id, slope_obs = slope), by = "path_id") %>%
+  mutate(
+    perm_p = map2_dbl(null_slopes, slope_obs, function(nulls, obs) {
+      mean(abs(nulls) >= abs(obs))
+    }),
+    # Minimum achievable p given n_perm (avoid reporting 0.000)
+    perm_p  = pmax(perm_p, 1 / (n_perm + 1)),
+    perm_fmt = case_when(
+      perm_p < 0.001 ~ "p_perm < 0.001",
+      TRUE           ~ sprintf("p_perm = %.3f", perm_p)
+    ),
+    perm_sig = case_when(
+      perm_p < 0.001 ~ "***",
+      perm_p < 0.01  ~ "**",
+      perm_p < 0.05  ~ "*",
+      perm_p < 0.10  ~ ".",
+      TRUE           ~ "ns"
+    )
+  )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# H3 — COMBINED ANNOTATION TABLE FOR THE FIGURE
+#
+# Merges mixed-model fixed-effect slope with permutation p-value.
+# The panel label now shows:
+#   slope (from LME), R²_marginal (fixed effects only),
+#   parametric p (from LME t-test, honest after accounting for random effects),
+#   permutation p (window-level shuffle, robust to large N).
+# ─────────────────────────────────────────────────────────────────────────────
+
+lm_stats_final <- mixed_stats %>%
+  left_join(select(perm_stats, path_id, perm_fmt, perm_sig), by = "path_id") %>%
+  mutate(
+    label = sprintf(
+      "\u03b2 = %+.3f\nR\u00b2m = %.3f\n%s %s\n%s %s",
+      slope, r2_marg,
+      p_fmt,    sig,
+      perm_fmt, perm_sig
+    )
+  )
+```
+
 ---
 
 ### Main figure: pairwise distance vs. forcing strength
@@ -1025,7 +1159,8 @@ p_dist_beta_all <- h3_model_data %>%
               linewidth = 0.9, alpha = 0.15) +
 
   geom_text(
-    data = mixed_stats, mapping = aes(label = label),
+    data = lm_stats_final,  #mixed_stats, 
+    mapping = aes(label = label),
     x = Inf, y = Inf, hjust = 1.08, vjust = 1.25,
     size = 2.0, colour = "grey20", lineheight = 1.3,
     inherit.aes = FALSE
@@ -1033,7 +1168,7 @@ p_dist_beta_all <- h3_model_data %>%
 
   scale_colour_manual(values = path_colours) +
   scale_x_continuous(
-    name   = "|Community \u03b2| (direct, all_taxa) \u2014 forcing strength",
+    name   = "|Community \u03b2| (all_taxa, pathway-matched) \u2014 forcing strength",
     labels = scales::label_number(accuracy = 0.01)
   ) +
   labs(y = "Pairwise response distance  |\u03b2\u1d62 \u2212 \u03b2\u2c7c|") +
@@ -1062,6 +1197,7 @@ ggsave("../output/Fig3_H3.tiff",
 #|   A positive β means taxa diverge more when the land-use contrast is strong.
 
 mixed_stats %>%
+  left_join(select(perm_stats, path_id, perm_fmt, perm_sig), by = "path_id") %>% #if permut
   left_join(select(path_meta, path_id, label), by = "path_id") %>%
   mutate(
     slope_fmt = sprintf("%+.4f", slope),
@@ -1076,9 +1212,11 @@ mixed_stats %>%
          "R\u00b2m"             = r2_fmt,
          "p (LME)"              = p_fmt,
          "Sig."                 = sig,
+         "p (perm.)"            = perm_fmt, #if permut
+         "Sig. (perm.)"         = perm_sig, #if permut
          "N (pair\u00d7window)" = n_fmt) %>%
   kbl(format = "html", escape = FALSE,
-      align  = c("l", "r", "r", "r", "r", "l", "r")) %>%
+      align  = c("l", "r", "r", "r", "r", "l", "r", "l","r")) %>%
   kable_styling(bootstrap_options = c("condensed", "hover"),
                 full_width = FALSE, font_size = 12) %>%
   row_spec(0, bold = TRUE, background = "#e8e8e8") %>%
