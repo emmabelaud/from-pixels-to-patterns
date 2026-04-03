@@ -54,7 +54,7 @@ Five data streams are integrated:
 
 ------------------------------------------------------------------------
 
-## 1. Package loading
+## 0. Package loading
 
 ```{r packages}
 library(tidyverse)   # Data wrangling and visualisation
@@ -64,6 +64,31 @@ library(jsonlite)    # Reading the taxonomic hierarchy JSON
 library(zoo)         # Rolling window calculations
 library(data.table)  # High-performance joins for root data
 ```
+
+------------------------------------------------------------------------
+
+## 1. Pipeline configuration
+
+```{r}
+# Time step options:
+#   "6 hours"  → raw scan resolution (default)
+#   "1 day"    → daily aggregates
+#   "12 hours" → twice-daily aggregates
+TIME_STEP       <- "1 day"
+
+# Derive everything else from TIME_STEP automatically
+step_hours      <- as.numeric(lubridate::duration(TIME_STEP), "hours")
+steps_per_day   <- 24 / step_hours          # e.g. 4 for 6h, 1 for daily
+window_size     <- 4 * steps_per_day        # always ~1 day of rolling context
+
+# Rolling join tolerances scale with the step size
+tol_9d_secs     <- (2  + step_hours / 24) * 86400   # ±2 days + 1 step margin
+tol_1d_secs     <- (0.5 + step_hours / 48) * 86400  # ±12 h + half-step margin
+
+# Canonical scan hours that exist in the raw data (always 6-hour native res)
+NATIVE_HOURS    <- c(0, 6, 12, 18)
+```
+
 
 ------------------------------------------------------------------------
 
@@ -98,9 +123,9 @@ df <- df_raw %>%
     minute = minute(date)
   ) %>%
   # Restrict to the main study period
-  filter(date > "2024-04-01 00:00:00") %>%
+  filter(date > "2024-03-01 00:00:00") %>%
   # Keep only the four canonical daily scan times
-  filter(minute == 0, hour %in% c(0, 6, 12, 18))
+  filter(minute == 0, hour %in% NATIVE_HOURS)
 ```
 
 ------------------------------------------------------------------------
@@ -224,23 +249,20 @@ df_filtered <- filter_taxa_df(df, filter_taxa = FALSE)
 Creates a full time × scanner grid, counts detections per taxon per image, and fills unobserved taxon–date–scanner combinations with **0** (taxon absent). Images with no scan at all remain **NA** (data missing).
 
 ```{r abundance-matrix}
-# Full sequence of 6-hour time steps across the study period
-seq_time <- seq(min(df$date), max(df$date), by = "6 hours")
+# Grid at the chosen time step
+seq_time <- seq(floor_date(min(df$date), TIME_STEP),
+                floor_date(max(df$date), TIME_STEP),
+                by = TIME_STEP)
 
-# Complete grid: all combinations of time steps and scanners
-complete_grid <- expand_grid(
-  date    = seq_time,
-  scanner = unique(df$scanner)
-)
+complete_grid <- expand_grid(date = seq_time, scanner = unique(df$scanner))
 
-# Aggregate detections to counts per taxon / date / scanner
+# Aggregate counts to the chosen resolution before pivoting
 df_complete <- df_filtered %>%
+  mutate(date = floor_date(date, TIME_STEP)) %>%   # ← key line
   group_by(taxa_levelup, date, scanner, depth, position, orientation) %>%
   reframe(count = n()) %>%
   mutate(presence = 1) %>%
-  pivot_wider(names_from  = taxa_levelup,
-              values_from = count,
-              values_fill = 0)
+  pivot_wider(names_from = taxa_levelup, values_from = count, values_fill = 0)
 
 # Left-join against the complete grid:
 #   - 0 if the scanner was active but the taxon was absent
@@ -413,8 +435,6 @@ data_sem <- data_sem %>%
 ### 4.1 Index parameters
 
 ```{r index-params}
-time_step_days    <- 1       # Temporal resolution (days)
-window_size       <- time_step_days * 4   # Rolling window width (number of 6-h steps)
 missing_data_rate <- 0.3     # Max fraction of NAs tolerated within a window
 ```
 
@@ -505,6 +525,7 @@ i_min           <- which.min(apply(pair_matrix, 2, function(p) {
   cos_angle(var_coord[p[1], ], var_coord[p[2], ])
 }))
 microclimate_index <- pair_matrix[, i_min]
+#microclimate_index <- c("temp_soil_amplitude", "hum_soil_amplitude") 
 
 cat("Microclimate indices selected:", microclimate_index[1], "and", microclimate_index[2])
 
@@ -553,7 +574,7 @@ root_density[, minute := minute(date)]
 root_density[minute == 1, date := date - 60]
 
 # Keep only 6-hour canonical scan times
-root_density <- root_density[minute(date) == 0 & hour(date) %in% c(0, 6, 12, 18)]
+root_density <- root_density[minute(date) == 0 & hour(date) %in% NATIVE_HOURS]
 
 # Derive structural factors from scanner position string
 root_density[, `:=`(
@@ -588,9 +609,8 @@ root_density <- ref_9d[root_density,
                                date_found_9d = date_target_9d),
                        roll = +Inf]
 
-root_density[, diff_9d := abs(as.numeric(
-  difftime(date_found_9d, date - days(9), units = "secs")))]
-root_density[, root_pixels_count_lag := ifelse(diff_9d <= 172800, pixels_9d, NA)]
+root_density[, diff_9d := abs(as.numeric(difftime(date_found_9d, date - days(9), units = "secs")))]
+root_density[, root_pixels_count_lag := ifelse(diff_9d <= tol_9d_secs, pixels_9d, NA)]
 root_density[, c("date_found_9d", "pixels_9d", "diff_9d") := NULL]
 
 # --- 1-day lag (tolerance: ≤ 12 hours = 43 200 s) ---
@@ -604,9 +624,8 @@ root_density <- ref_1d[root_density,
                                date_found_1d = date_target_1d),
                        roll = +Inf]
 
-root_density[, diff_1d := abs(as.numeric(
-  difftime(date_found_1d, date - days(1), units = "secs")))]
-root_density[, root_pixels_count_lag_1d := ifelse(diff_1d <= 43200, pixels_1d, NA)]
+root_density[, diff_1d := abs(as.numeric(difftime(date_found_1d, date - days(1), units = "secs")))]
+root_density[, root_pixels_count_lag_1d := ifelse(diff_1d <= tol_1d_secs, pixels_1d, NA)]
 root_density[, c("date_found_1d", "pixels_1d", "diff_1d") := NULL]
 ```
 
@@ -688,4 +707,14 @@ data_sem <- data_sem %>%
 ```{r export}
 data_sem$date <- format(data_sem$date, "%Y-%m-%d %H:%M:%S")
 write.csv(data_sem, "../output/SEM_database.csv", row.names = FALSE, quote = TRUE)
+
+jsonlite::write_json(
+  list(
+    time_step       = TIME_STEP,
+    step_hours      = step_hours,
+    steps_per_day   = steps_per_day
+  ),
+  "../output/pipeline_config.json",
+  pretty = TRUE
+)
 ```
