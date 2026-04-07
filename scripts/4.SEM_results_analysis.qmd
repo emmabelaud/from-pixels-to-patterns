@@ -731,8 +731,6 @@ The predictor on the x-axis is the **signed, pathway-matched community β**: pos
 # pathway_focus   : pathways included in the CV analysis. total_effect excluded
 #                   — it compounds direct + indirect and would be redundant
 #                   given that both are already shown.
-# min_taxa_win    : minimum distinct taxa per window to compute a meaningful CV.
-#                   Set to 3 — the minimum for a non-trivial standard deviation.
 # eps             : small constant added to the CV denominator to avoid
 #                   division by zero in windows where all taxon β ≈ 0.
 # pathway_order   : panel display order (causal depth: direct → two-step
@@ -747,7 +745,6 @@ pathway_focus <- c(
   "total_indirect"                  # sum of all five indirect routes
 )
 
-min_taxa_win <- 3
 eps          <- 1e-4
 
 pathway_order <- pathway_focus
@@ -818,8 +815,7 @@ h3_taxa_win <- h3_win_raw %>%
 # ══════════════════════════════════════════════════════════════════════════════
 # COMPUTE PER-WINDOW COEFFICIENT OF VARIATION
 #
-# For each (path_id × date_start) group with at least min_taxa_win distinct
-# taxa, the CV is:
+# For each (path_id × date_start) group, the CV is:
 #
 #   CV = SD(β_taxa) / (mean|β_taxa| + eps)
 #
@@ -828,7 +824,6 @@ h3_taxa_win <- h3_win_raw %>%
 # the denominator absorbs the overall effect magnitude, CV is immune to the
 # mathematical artifact that inflates raw distances in high-forcing windows.
 #
-# Windows with fewer than min_taxa_win taxa are silently dropped (tibble()).
 # The resulting h3_cv table has one row per (path_id × date_start), which
 # eliminates within-window pseudoreplication entirely — no random effect for
 # pairs is needed in the downstream GLS.
@@ -836,12 +831,10 @@ h3_taxa_win <- h3_win_raw %>%
 
 #' Compute the per-window CV for one (pathway × window) slice
 #'
-#' @param df  Slice with columns `taxon` and `std_estimate`. Requires at
-#'            least `min_taxa_win` distinct taxa.
+#' @param df  Slice with columns `taxon` and `std_estimate`. 
 #' @return    Single-row tibble with cv and n_taxa, or empty tibble.
 compute_cv <- function(df) {
   taxa <- unique(df$taxon)
-  if (length(taxa) < min_taxa_win) return(tibble())
   beta_vec <- df$std_estimate
   tibble(
     cv     = sd(beta_vec, na.rm = TRUE) / (mean(abs(beta_vec), na.rm = TRUE) + eps),
@@ -1056,7 +1049,6 @@ cv_stats %>%
       "GLS: CV ~ community \u03b2 (signed, pathway-matched) + AR(1). ",
       "ML estimation (nlme::gls). ",
       "CV = SD(\u03b2_taxa) / (mean|\u03b2_taxa| + \u03b5), \u03b5 = 1\u00d710\u207b\u2074. ",
-      "Windows with fewer than ", min_taxa_win, " valid taxa excluded. ",
       "Negative \u03b2 = convergence (CV decreases with cultivated forcing). ",
       "Sig. codes: *** p < 0.001 \u00a0** p < 0.01 \u00a0* p < 0.05 \u00a0. p < 0.10."
     ),
