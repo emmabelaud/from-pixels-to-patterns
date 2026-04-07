@@ -20,18 +20,16 @@ execute:
 
 This is the **final step** of the SEM pipeline, following:
 
-1. `data_preparation.qmd` — assembles the SEM database
-2. `sem_diagnostic.qmd` — selects window duration, transformation, and valid windows
-3. `3_SEM_modelisation.qmd` — fits all models and writes result databases
+1.  `data_preparation.qmd` — assembles the SEM database
+2.  `sem_diagnostic.qmd` — selects window duration, transformation, and valid windows
+3.  `3_SEM_modelisation.qmd` — fits all models and writes result databases
 
-**No modelling is performed here.** Every number in every figure comes directly
-from pre-computed CSV files. Re-running this script is fast and safe — it never
-touches a model.
+**No modelling is performed here.** Every number in every figure comes directly from pre-computed CSV files. Re-running this script is fast and safe — it never touches a model.
 
 ## Input databases
 
 | File | What it contains |
-|------|-----------------|
+|----|----|
 | `H1_adjusted_values.csv` | Per-observation null-model residuals with date, land-use label, season |
 | `H1_model_summary.csv` | β, SE, t, p, Hedge's g, R² from the two-step H1 model |
 | `DAG_coefficients.csv` | Path coefficients from the full-dataset piecewise SEM |
@@ -39,7 +37,7 @@ touches a model.
 | `SEM_results_database.csv` | Rolling-window path coefficients for all taxa |
 | `indirect_effects.csv` | Rolling-window indirect effect products for all taxa |
 
----
+------------------------------------------------------------------------
 
 ```{r setup}
 # ══════════════════════════════════════════════════════════════════════════════
@@ -220,21 +218,17 @@ indirect_effects <- read.csv("../output/indirect_effects.csv",
 transfo_fauna <- h1_summary$transformation[1]
 ```
 
----
+------------------------------------------------------------------------
 
 ## 1. H1 — Direct effect of land-use type on faunal activity
 
-> **Land-use type directly structures faunal activity, with treed habitats
-> sustaining lower but more temporally stable activity than cultivated zones.**
+> **Land-use type directly structures faunal activity, with treed habitats sustaining lower but more temporally stable activity than cultivated zones.**
 
 ### How the values are computed (two-step approach)
 
-Figures in this section show **position-adjusted faunal activity** — null-model
-residuals shifted to the absolute scale by adding the Step-1 intercept.
+Figures in this section show **position-adjusted faunal activity** — null-model residuals shifted to the absolute scale by adding the Step-1 intercept.
 
-**Step 1 — Remove spatial structure.** A mixed model with only an intercept is
-fitted on the full dataset. Random effects for orientation and depth absorb all
-variation attributable to scanner placement:
+**Step 1 — Remove spatial structure.** A mixed model with only an intercept is fitted on the full dataset. Random effects for orientation and depth absorb all variation attributable to scanner placement:
 
 $$y^* \sim 1 + (1 \mid \text{orientation} / \text{depth}) + \text{AR}(1)$$
 
@@ -275,7 +269,7 @@ shared_ylim <- c(
 )
 
 # ── Panel A: boxplot ──────────────────────────────────────────────────────────
-# Right border suppressed so panels merge at their shared edge.
+# Right border suppressed so panels merge visually at their shared edge.
 p_box <- ggplot(
   h1_adj,
   aes(x = position_label, y = abs_value,
@@ -349,35 +343,28 @@ ggsave("../output/Fig1_H1_combined.tiff", h1_combined,
        width = 20, height = 10, units = "cm", dpi = 300, compression = "lzw")
 ```
 
----
+------------------------------------------------------------------------
 
 ## 2. H2 — Indirect effects through contrasting causal pathways
 
-> **Land-use effects are mediated through contrasting causal pathways —
-> agricultural management drives faunal activity primarily through altered
-> microclimate, whereas treed habitats sustain faunal activity more consistently
-> through root resource supply.**
+> **Land-use effects are mediated through contrasting causal pathways — agricultural management drives faunal activity primarily through altered microclimate, whereas treed habitats sustain faunal activity more consistently through root resource supply.**
 
 ### How the pathway estimates are computed
 
-The SEM estimates one β per path per rolling window. An **indirect effect** is
-the product of all β values along a causal route. All variables are z-scored
-within each window, so products are standardised and comparable across windows
-and pathways.
+The SEM estimates one β per path per rolling window. An **indirect effect** is the product of all β values along a causal route. All variables are z-scored within each window, so products are standardised and comparable across windows and pathways.
 
-| Path | Expression |
-|------|-----------|
-| Direct | $\beta_9$ |
-| lu → mc₁ → fauna | $\beta_1 \times \beta_6$ |
-| lu → mc₂ → fauna | $\beta_2 \times \beta_7$ |
-| lu → root → fauna | $\beta_5 \times \beta_8$ |
+| Path                    | Expression                              |
+|-------------------------|-----------------------------------------|
+| Direct                  | $\beta_9$                               |
+| lu → mc₁ → fauna        | $\beta_1 \times \beta_6$                |
+| lu → mc₂ → fauna        | $\beta_2 \times \beta_7$                |
+| lu → root → fauna       | $\beta_5 \times \beta_8$                |
 | lu → mc₁ → root → fauna | $\beta_1 \times \beta_3 \times \beta_8$ |
 | lu → mc₂ → root → fauna | $\beta_2 \times \beta_4 \times \beta_8$ |
-| **Total indirect** | sum of the five routes above |
-| **Total effect** | direct + total indirect |
+| **Total indirect**      | sum of the five routes above            |
+| **Total effect**        | direct + total indirect                 |
 
-**Sign convention:** A = 0, C = 1 — negative values indicate a stronger effect
-in the treed system.
+**Sign convention:** A = 0, C = 1 — negative values indicate a stronger effect in the treed system.
 
 ### Full-dataset piecewise SEM: DAG annotation table
 
@@ -638,7 +625,7 @@ p_marginal <- ggplot(h2_marginal, aes(colour = path_id)) +
   geom_point(aes(x = label, y = b_global, shape = "global"),
              position = position_nudge(x = 0.28),
              size = 2.2, fill = "white", stroke = 0.8, na.rm = TRUE) +
-  geom_point(data = legend_dummy,
+  geom_point(data    = legend_dummy,
              mapping = aes(x = x, y = y, shape = shape),
              colour = "grey30", fill = "white",
              size = 2.2, stroke = 1.0, na.rm = TRUE) +
@@ -717,30 +704,23 @@ ggsave("../output/Fig2_H2_combined.tiff", h2_combined,
        width = 24, height = 12, units = "cm", dpi = 300, compression = "lzw")
 ```
 
----
+------------------------------------------------------------------------
 
-## 3. H3 — Taxonomic specificity: does inter-taxon divergence track land-use forcing strength?
+## 3. H3 — Taxonomic response diversity under contrasting land-use forcing
 
-> **When the land-use contrast is strongest, do individual taxa diverge more in
-> their responses — or do they all move together? And which taxon pairs are
-> systematically most different from one another regardless of context?**
+> **Does land-use intensification compress taxonomic response diversity? Understrong land-use effects, do individual taxa converge toward similar responses, or does winner-loser dynamics amplify inter-taxon heterogeneity?**
 
-<!-- Dependencies: sem_results, indirect_effects, path_meta, path_colours,
-     season_order, theme_sem(), interventions — all defined in setup. -->
+### Conceptual basis: the coefficient of variation as a response-diversity metric
 
-### Conceptual basis: what is a "pairwise response distance"?
+For each rolling window and each causal pathway the SEM estimates one standardised β per taxon — the strength of the land-use effect on that taxon's activity through that pathway. The **per-window coefficient of variation** (CV) summarises the relative dispersion of these individual responses:
 
-For each rolling window and each causal pathway, the SEM estimates one
-standardised β per taxon. The **pairwise response distance** between taxa *i*
-and *j* is:
+$$\text{CV}_w = \frac{\text{SD}(\beta_{\text{taxa},w})}{\overline{|\beta_{\text{taxa},w}|} + \varepsilon}$$
 
-$$d_{ij} = \left| \hat{\beta}_i - \hat{\beta}_j \right|$$
+A high CV means taxa respond very differently from each other (high response diversity); a low CV means they respond similarly (convergence). Dividing by the mean absolute β removes the effect-size confound: even when all taxa shift together as the community signal strengthens, a constant CV indicates proportional rather than convergent responses. A **declining CV** as the community β increases is the signature of genuine convergence.
 
-Because all β values are z-scored within each window, *d* is dimensionless and
-comparable across pathways and windows. The community-level direct β (`all_taxa`)
-serves as a proxy for **forcing strength** in each window.
+The predictor on the x-axis is the **signed, pathway-matched community β**: positive values correspond to strong land-use effect windows.
 
----
+------------------------------------------------------------------------
 
 ### Parameters
 
@@ -748,12 +728,15 @@ serves as a proxy for **forcing strength** in each window.
 # ══════════════════════════════════════════════════════════════════════════════
 # ANALYSIS PARAMETERS
 #
-# pathway_focus       : pathways included in the pairwise distance analysis.
-#                       total_effect excluded — it compounds direct + indirect
-#                       and would be redundant given that both are already shown.
-# min_taxa_per_window : minimum valid taxa per window to form any pair (≥ 2).
-# pathway_order       : display order in facet panels (causal depth: direct →
-#                       two-step → three-step → composite).
+# pathway_focus   : pathways included in the CV analysis. total_effect excluded
+#                   — it compounds direct + indirect and would be redundant
+#                   given that both are already shown.
+# min_taxa_win    : minimum distinct taxa per window to compute a meaningful CV.
+#                   Set to 3 — the minimum for a non-trivial standard deviation.
+# eps             : small constant added to the CV denominator to avoid
+#                   division by zero in windows where all taxon β ≈ 0.
+# pathway_order   : panel display order (causal depth: direct → two-step
+#                   → three-step → composite).
 # ══════════════════════════════════════════════════════════════════════════════
 
 pathway_focus <- c(
@@ -764,12 +747,13 @@ pathway_focus <- c(
   "total_indirect"                  # sum of all five indirect routes
 )
 
-min_taxa_per_window <- 2
+min_taxa_win <- 3
+eps          <- 1e-4
 
-pathway_order <- pathway_focus   # same order used throughout H3
+pathway_order <- pathway_focus
 ```
 
----
+------------------------------------------------------------------------
 
 ### Data preparation
 
@@ -777,12 +761,16 @@ pathway_order <- pathway_focus   # same order used throughout H3
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD PER-WINDOW, PER-TAXON LONG TABLE
 #
-# h3_direct_win  — direct land_use → fauna β (from sem_results).
+# h3_direct_win   — direct land_use → fauna β (from sem_results).
 # h3_indirect_win — indirect β-products (from indirect_effects, pivoted long).
-# Both are filtered to pathway_focus and combined into h3_win_raw.
 #
-# comm_beta_win  — community-level direct β per window (forcing-strength proxy).
-# h3_taxa_win    — individual taxa only (community aggregate excluded).
+# comm_beta_win   — community (all_taxa) β per pathway × window.
+#                   Pathway-matched: the CV for via_root is plotted against the
+#                   all_taxa via_root β, not the direct β. This ensures the
+#                   x-axis forcing proxy is ecologically meaningful for each
+#                   panel (via_root forcing → via_root response diversity).
+#
+# h3_taxa_win     — individual taxa only (all_taxa excluded from CV computation).
 # ══════════════════════════════════════════════════════════════════════════════
 
 h3_direct_win <- sem_results %>%
@@ -801,7 +789,7 @@ h3_indirect_win <- indirect_effects %>%
   mutate(date_start = as.Date(date_start)) %>%
   select(taxon, path_id, date_start, std_estimate)
 
-# Season re-derived from date_start for consistency across pipeline versions
+# Season derived from date_start for pipeline-version independence
 h3_win_raw <- bind_rows(h3_direct_win, h3_indirect_win) %>%
   filter(path_id %in% pathway_focus) %>%
   mutate(
@@ -813,6 +801,7 @@ h3_win_raw <- bind_rows(h3_direct_win, h3_indirect_win) %>%
     ), levels = season_order)
   )
 
+# Pathway-matched community β (signed) — one row per path_id × date_start
 comm_beta_win <- h3_win_raw %>%
   filter(taxon == "all_taxa") %>%
   select(path_id, date_start, community_beta = std_estimate)
@@ -821,565 +810,407 @@ h3_taxa_win <- h3_win_raw %>%
   filter(taxon != "all_taxa")
 ```
 
----
+------------------------------------------------------------------------
 
-### Pairwise distance computation
+### CV computation
 
-```{r h3-distances}
+```{r h3-cv}
 # ══════════════════════════════════════════════════════════════════════════════
-# COMPUTE PER-WINDOW PAIRWISE DISTANCES
+# COMPUTE PER-WINDOW COEFFICIENT OF VARIATION
 #
-#   d(i,j) = |β_i − β_j|   for each unique (i, j) × window × pathway triple.
+# For each (path_id × date_start) group with at least min_taxa_win distinct
+# taxa, the CV is:
 #
-# Windows with fewer than min_taxa_per_window valid taxa return an empty tibble
-# and are silently dropped. The guard nrow(a) != 1 || nrow(b) != 1 catches
-# duplicate rows that would otherwise inflate distances.
+#   CV = SD(β_taxa) / (mean|β_taxa| + eps)
 #
-# Outlier removal: Tukey 1.5×IQR fence applied per pathway. Removes windows
-# where a near-absent taxon inflates its β estimate. Effect on slope is
-# negligible but removes visual noise from the scatter.
+# This is a relative dispersion measure: it answers "how spread out are the
+# individual taxon responses *relative to the typical effect size*?". Because
+# the denominator absorbs the overall effect magnitude, CV is immune to the
+# mathematical artifact that inflates raw distances in high-forcing windows.
+#
+# Windows with fewer than min_taxa_win taxa are silently dropped (tibble()).
+# The resulting h3_cv table has one row per (path_id × date_start), which
+# eliminates within-window pseudoreplication entirely — no random effect for
+# pairs is needed in the downstream GLS.
 # ══════════════════════════════════════════════════════════════════════════════
 
-#' Compute all unique pairwise β-distances for one (pathway × window) slice
+#' Compute the per-window CV for one (pathway × window) slice
 #'
 #' @param df  Slice with columns `taxon` and `std_estimate`. Requires at
-#'            least `min_taxa_per_window` distinct taxa.
-#' @return    Tibble (taxon_a, taxon_b, dist), or empty tibble.
-compute_win_pairs <- function(df) {
+#'            least `min_taxa_win` distinct taxa.
+#' @return    Single-row tibble with cv and n_taxa, or empty tibble.
+compute_cv <- function(df) {
   taxa <- unique(df$taxon)
-  if (length(taxa) < min_taxa_per_window) return(tibble())
-  combn(taxa, 2, simplify = FALSE) %>%
-    map_dfr(function(pair) {
-      a <- df %>% filter(taxon == pair[1])
-      b <- df %>% filter(taxon == pair[2])
-      if (nrow(a) != 1 || nrow(b) != 1) return(tibble())
-      tibble(taxon_a = pair[1], taxon_b = pair[2],
-             dist = abs(a$std_estimate - b$std_estimate))
-    })
+  if (length(taxa) < min_taxa_win) return(tibble())
+  beta_vec <- df$std_estimate
+  tibble(
+    cv     = sd(beta_vec, na.rm = TRUE) / (mean(abs(beta_vec), na.rm = TRUE) + eps),
+    n_taxa = length(taxa)
+  )
 }
 
-h3_win_pairs <- h3_taxa_win %>%
+h3_cv <- h3_taxa_win %>%
   group_by(path_id, date_start, season) %>%
-  group_modify(~ compute_win_pairs(.x)) %>%
+  group_modify(~ compute_cv(.x)) %>%
   ungroup() %>%
+  # Attach pathway-matched, signed community β
   left_join(comm_beta_win, by = c("path_id", "date_start")) %>%
-  mutate(
-    abs_forcing = abs(community_beta),
-    pair_label  = paste(pmin(taxon_a, taxon_b),
-                        pmax(taxon_a, taxon_b), sep = " \u2014 "),
-    path_id     = factor(path_id, levels = pathway_order)
-  ) %>%
-  group_by(path_id) %>%
-  filter(
-    dist >= quantile(dist, 0.25, na.rm = TRUE) - 1.5 * IQR(dist, na.rm = TRUE),
-    dist <= quantile(dist, 0.75, na.rm = TRUE) + 1.5 * IQR(dist, na.rm = TRUE)
-  ) %>%
-  ungroup()
+  filter(!is.na(cv), !is.na(community_beta)) %>%
+  mutate(path_id = factor(path_id, levels = pathway_order))%>%
+  mutate(community_beta = abs(community_beta))
 ```
 
----
+------------------------------------------------------------------------
 
-### Mixed-model fitting
+### GLS model fitting
 
-```{r h3-mixed-models}
+```{r h3-gls}
 # ══════════════════════════════════════════════════════════════════════════════
-# MIXED MODEL: dist ~ abs_forcing + (1 | window / pair) + AR(1)
+# FIT GLS: cv ~ community_beta + AR(1)
 #
-# Three violations of plain OLS are addressed simultaneously:
+# Because h3_cv contains one observation per window (no pair-level
+# pseudoreplication), a simple GLS with an AR(1) residual structure is the
+# appropriate model. No random effects are needed.
 #
-#   (1) Within-window pseudoreplication
-#       All pairs in the same window share the identical abs_forcing value.
-#       A random intercept for win_lab (outer level) absorbs window-level
-#       variance and separates it from the forcing signal.
+# Predictor: signed community_beta (pathway-matched).
+#   Negative slope → CV decreases as cultivated forcing strengthens → convergence.
+#   Positive slope → CV increases → winner-loser divergence.
 #
-#   (2) Between-pair baseline differences
-#       Each taxon pair has a characteristic divergence level that persists
-#       across windows. A random intercept for pair_lab (inner level) absorbs
-#       this, so the fixed-effect slope reflects context-dependent divergence
-#       rather than constitutive pair differences.
+# AR(1) within the window time series absorbs the heavy overlap between
+# adjacent rolling windows (daily steps, 14-day span ≈ 13/14 overlap).
 #
-#   (3) Temporal autocorrelation
-#       Windows advance in daily steps over a 14-day span (≈ 13/14 overlap).
-#       corAR1(~ date_num | win_lab / pair_lab) absorbs residual correlation
-#       within each pair's time series.
-#
-# Nesting: win_lab / pair_lab approximates the crossed (window × pair) structure
-# that nlme::lme() cannot fit directly. AR(1) is specified at the innermost
-# level to capture within-pair temporal dependence.
-#
-# Fitting method: ML (not REML) so fixed-effect p-values are valid.
-# returnObject = TRUE returns the best attempt if convergence is not perfect.
+# ML estimation for valid fixed-effect p-values.
 # ══════════════════════════════════════════════════════════════════════════════
 
-h3_model_data <- h3_win_pairs %>%
-  filter(!is.na(abs_forcing), abs_forcing > 0) %>%
-  mutate(
-    path_id  = factor(path_id, levels = pathway_order),
-    date_num = as.numeric(date_start),   # numeric index required by corAR1
-    pair_lab = as.character(pair_label),
-    win_lab  = as.character(date_start)
-  )
-
-
-#' Fit one LME for a single pathway slice
+#' Fit one GLS(cv ~ community_beta, AR(1)) for a single pathway slice
 #'
-#' @param df  Pathway-specific slice of h3_model_data.
-#' @return    An lme object, or NULL on hard failure.
-fit_lme_pathway <- function(df) {
+#' @param df  Pathway-specific slice of h3_cv with columns cv, community_beta,
+#'            and date_start.
+#' @return    A gls object, or NULL on hard failure.
+fit_cv_gls <- function(df) {
+  df <- df %>% mutate(date_num = as.numeric(date_start))
   fit_once <- function(d)
-    nlme::lme(
-      fixed       = dist ~ abs_forcing,
-      random      = ~ 1 | win_lab / pair_lab,
-      correlation = nlme::corAR1(form = ~ date_num | win_lab / pair_lab),
+    nlme::gls(
+      cv ~ community_beta,
+      correlation = nlme::corAR1(form = ~ date_num),
       method      = "ML",
       data        = d,
-      control     = nlme::lmeControl(opt = "optim", maxIter = 200,
-                                     msMaxIter = 200, tolerance = 1e-5,
-                                     returnObject = TRUE)
+      control     = nlme::glsControl(returnObject = TRUE)
     )
   tryCatch(
     fit_once(df),
-    warning = function(w) {
-      message("lme warning (", conditionMessage(w), ") — refitting")
-      suppressWarnings(fit_once(df))
-    },
-    error = function(e) {
-      message("lme failed: ", conditionMessage(e)); NULL
-    }
+    warning = function(w) suppressWarnings(fit_once(df)),
+    error   = function(e) { message("GLS failed: ", e$message); NULL }
   )
 }
 
-mixed_fits <- h3_model_data %>%
+# ── Fit per pathway ────────────────────────────────────────────────────────────
+cv_fits <- h3_cv %>%
   group_by(path_id) %>%
-  group_modify(~ tibble(fit   = list(fit_lme_pathway(.x)),
-                        n_obs = nrow(.x))) %>%
+  group_modify(~ tibble(fit = list(fit_cv_gls(.x)), n_obs = nrow(.x))) %>%
   ungroup()
 
-
 # ── Extract fixed-effect statistics ───────────────────────────────────────────
-# Marginal R² (Nakagawa & Schielzeth 2013):
-#   var(population-level fitted values) /
-#   (var(population fitted) + var(random deviations) + var(residuals))
-# This is the fraction of total variance attributable to abs_forcing alone.
-mixed_stats <- mixed_fits %>%
+# R²m for GLS: var(fitted) / (var(fitted) + var(residuals))
+# This is the fraction of total variance explained by community_beta alone.
+cv_stats <- cv_fits %>%
   filter(!map_lgl(fit, is.null)) %>%
   mutate(
     tbl      = map(fit, ~ summary(.x)$tTable),
-    slope    = map_dbl(tbl, ~ .x["abs_forcing", "Value"]),
-    se_slope = map_dbl(tbl, ~ .x["abs_forcing", "Std.Error"]),
-    t_val    = map_dbl(tbl, ~ .x["abs_forcing", "t-value"]),
-    df_resid = map_dbl(tbl, ~ .x["abs_forcing", "DF"]),
-    pval_lme = map_dbl(tbl, ~ .x["abs_forcing", "p-value"]),
-    r2_marg  = map_dbl(fit, function(m) {
-      var_fix <- var(predict(m, level = 0))
-      var_ran <- var(predict(m, level = 1) - predict(m, level = 0))
-      var_res <- var(residuals(m))
-      var_fix / (var_fix + var_ran + var_res)
+    slope    = map_dbl(tbl, ~ .x["community_beta", "Value"]),
+    se_slope = map_dbl(tbl, ~ .x["community_beta", "Std.Error"]),
+    t_val    = map_dbl(tbl, ~ .x["community_beta", "t-value"]),
+    pval     = map_dbl(tbl, ~ .x["community_beta", "p-value"]),
+    r2       = map_dbl(fit, function(m) {
+      vf <- var(fitted(m)); vr <- var(residuals(m))
+      vf / (vf + vr)
     }),
-    p_fmt = case_when(pval_lme < 0.001 ~ "p < 0.001",
-                      TRUE             ~ sprintf("p = %.3f", pval_lme)),
-    sig   = case_when(pval_lme < 0.001 ~ "***",
-                      pval_lme < 0.01  ~ "**",
-                      pval_lme < 0.05  ~ "*",
-                      pval_lme < 0.10  ~ ".",
-                      TRUE             ~ "ns"),
+    p_fmt = case_when(pval < 0.001 ~ "p < 0.001",
+                      TRUE         ~ sprintf("p = %.3f", pval)),
+    sig   = case_when(pval < 0.001 ~ "***", pval < 0.01 ~ "**",
+                      pval < 0.05  ~ "*",   pval < 0.10 ~ ".",
+                      TRUE         ~ "ns"),
+    # Ecological interpretation: negative slope = convergence under forcing
+    result = case_when(
+      slope < 0 & pval < 0.05 ~ "\u2191 convergence",
+      slope > 0 & pval < 0.05 ~ "\u2193 divergence",
+      TRUE                     ~ "ns"
+    ),
+    # Multi-line annotation for figure panels
     label = sprintf("\u03b2 = %+.3f\nR\u00b2m = %.3f\n%s %s",
-                    slope, r2_marg, p_fmt, sig)
+                    slope, r2, p_fmt, sig)
   ) %>%
   select(-tbl)
 ```
 
-### Permutation
-```{r}
-# ─────────────────────────────────────────────────────────────────────────────
-# H3 — WINDOW-LEVEL PERMUTATION TEST
-#
-# Null hypothesis: there is no relationship between community forcing strength
-# and inter-taxon pairwise distance, beyond what arises from the temporal
-# autocorrelation structure and pair-specific baseline divergence levels.
-#
-# Permutation strategy:
-#   For each replicate, the mapping between windows and their abs_forcing values
-#   is shuffled — i.e. window labels are permuted while all pair observations
-#   within each window remain together. This breaks the forcing–distance link
-#   while preserving:
-#     (a) the within-window pair structure (all pairs still share the same
-#         forcing value within a permuted window),
-#     (b) the temporal ordering of actual distance values (pairs still follow
-#         their true seasonal trajectory; only the forcing axis is scrambled).
-#
-#   A simpler row-level permutation would be anti-conservative because it would
-#   destroy the AR(1) structure and produce a null distribution with more
-#   variance than the true null.
-#
-# For each permutation, only the OLS slope is extracted (not the full mixed
-# model) to keep runtime tractable. OLS and LME slopes estimate the same
-# quantity under H0 (no forcing effect), so the OLS permutation distribution
-# is a valid reference for testing the LME slope.
-#
-# n_perm: 999 permutations give a minimum achievable p-value of 0.001.
-#         Increase to 4999 for publication if runtime permits.
-# ─────────────────────────────────────────────────────────────────────────────
+------------------------------------------------------------------------
 
-n_perm <- 999
-set.seed(2025)   # reproducibility
+### Main figure: CV vs. community β
 
-# ── Build a window-level forcing lookup (one row per window) ──────────────────
-# This is what gets permuted: the date_start → abs_forcing mapping.
-window_forcing <- h3_model_data %>%
-  distinct(date_start, abs_forcing)
-
-#' Run one permutation for a single pathway slice
-#'
-#' @param df        Pathway-specific slice with columns dist, date_start.
-#' @param win_tbl   The window_forcing lookup table (will be shuffled).
-#' @return          OLS slope on the permuted abs_forcing.
-one_perm <- function(df, win_tbl) {
-  # Shuffle the forcing values across windows (row permutation of win_tbl)
-  shuffled <- win_tbl %>%
-    mutate(abs_forcing = sample(abs_forcing))
-
-  df_perm <- df %>%
-    select(-abs_forcing) %>%
-    left_join(shuffled, by = "date_start")
-
-  coef(lm(dist ~ abs_forcing, data = df_perm))[2]
-}
-
-# ── Run permutations per pathway ──────────────────────────────────────────────
-# Progress is printed to the console; suppress with invisible() if running
-# inside a non-interactive render.
-perm_results <- h3_model_data %>%
-  group_by(path_id) %>%
-  group_modify(function(df, key) {
-    message("Permuting pathway: ", key$path_id)
-    
-    # 1. Create a simple mapping of date to forcing for THIS pathway
-    win_map <- df %>% distinct(date_start, abs_forcing)
-    
-    # 2. Extract the actual distance and date column to avoid repeated df manipulation
-    # We use match() to link dates to their shuffled forcing values extremely fast
-    date_indices <- match(df$date_start, win_map$date_start)
-    dist_vals <- df$dist
-    forcing_vals <- win_map$abs_forcing
-    
-    null_slopes <- replicate(n_perm, {
-      # Shuffle only the small vector of forcing values
-      shuffled_forcing <- sample(forcing_vals)
-      # Map them back to the long 'dist' vector
-      perm_forcing <- shuffled_forcing[date_indices]
-      # Fast linear model (returns only the slope)
-      coef(lm.fit(cbind(1, perm_forcing), dist_vals))[2]
-    })
-    
-    tibble(null_slopes = list(null_slopes))
-  }) %>%
-  ungroup()
-
-# ── Compute permutation p-values ──────────────────────────────────────────────
-# Two-sided: proportion of |null slope| ≥ |observed slope|.
-# The observed slope comes from the LME fit (mixed_stats), not a plain OLS,
-# but both estimate the same quantity under H0 so the comparison is valid.
-perm_stats <- perm_results %>%
-  left_join(select(mixed_stats, path_id, slope_obs = slope), by = "path_id") %>%
-  mutate(
-    perm_p = map2_dbl(null_slopes, slope_obs, function(nulls, obs) {
-      mean(abs(nulls) >= abs(obs))
-    }),
-    # Minimum achievable p given n_perm (avoid reporting 0.000)
-    perm_p  = pmax(perm_p, 1 / (n_perm + 1)),
-    perm_fmt = case_when(
-      perm_p < 0.001 ~ "p_perm < 0.001",
-      TRUE           ~ sprintf("p_perm = %.3f", perm_p)
-    ),
-    perm_sig = case_when(
-      perm_p < 0.001 ~ "***",
-      perm_p < 0.01  ~ "**",
-      perm_p < 0.05  ~ "*",
-      perm_p < 0.10  ~ ".",
-      TRUE           ~ "ns"
-    )
-  )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# H3 — COMBINED ANNOTATION TABLE FOR THE FIGURE
-#
-# Merges mixed-model fixed-effect slope with permutation p-value.
-# The panel label now shows:
-#   slope (from LME), R²_marginal (fixed effects only),
-#   parametric p (from LME t-test, honest after accounting for random effects),
-#   permutation p (window-level shuffle, robust to large N).
-# ─────────────────────────────────────────────────────────────────────────────
-
-lm_stats_final <- mixed_stats %>%
-  left_join(select(perm_stats, path_id, perm_fmt, perm_sig), by = "path_id") %>%
-  mutate(
-    label = sprintf(
-      "\u03b2 = %+.3f\nR\u00b2m = %.3f\n%s %s\n%s %s",
-      slope, r2_marg,
-      p_fmt,    sig,
-      perm_fmt, perm_sig
-    )
-  )
-```
-
----
-
-### Main figure: pairwise distance vs. forcing strength
-
-```{r fig-h3-main}
-#| label: fig-h3-main
+```{r fig-h3-cv}
+#| label: fig-h3-cv
 #| fig-cap: >
-#|   **Pairwise taxon response distance vs. community land-use forcing strength
-#|   across all causal pathways (H3).** Each point is one taxon pair × rolling
-#|   window. x-axis: |community β| (direct, all_taxa). y-axis: |β_i − β_j|
-#|   for that pathway and window. Points coloured by pathway (same palette as
-#|   Fig. 2). Dark line = LME fixed-effect slope with 95% CI. Panel annotations:
-#|   β (LME slope), R²m (marginal R²), and parametric p (LME t-test accounting
-#|   for random effects and AR(1) structure). Distances winsorised at
-#|   1.5×IQR per pathway before fitting.
+#|   **Per-window coefficient of variation (CV) of individual taxon land-use
+#|   responses vs signed community β across all causal pathways (H3).** One
+#|   point per rolling window; colour encodes pathway (same palette as Fig. 2). x-axis: signed, pathway-matched community β
+#|   (positive = cultivated-dominant; negative = treed-dominant). y-axis:
+#|   CV = SD(β_taxa) / mean|β_taxa|, a scale-free measure of response
+#|   heterogeneity among individual taxa. A negative slope (dark line) supports
+#|   convergence under cultivated forcing; a positive slope indicates
+#|   winner-loser divergence. Line = GLS fixed-effect slope with 95% CI.
+#|   Panel annotations: β (slope), R²m (marginal R²), and p (GLS t-test).
 #| fig-width: 15
 #| fig-height: 9
 
 pathway_labels_h3 <- setNames(path_meta$label, path_meta$path_id)
 
-p_dist_beta_all <- h3_model_data %>%
+p_cv <- h3_cv %>%
   mutate(path_id = factor(path_id, levels = pathway_order)) %>%
-  ggplot(aes(x = abs_forcing, y = dist)) +
+  ggplot(aes(x = community_beta, y = cv)) +
 
   facet_wrap(~ path_id, nrow = 2, scales = "free",
              labeller = as_labeller(pathway_labels_h3)) +
 
-  geom_point(aes(colour = path_id), alpha = 0.25, size = 0.9, shape = 16) +
+  # Zero reference on x (boundary between cultivated- and treed-dominant)
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.3,
+             linetype = "dashed") +
 
-  # OLS line used for display; slope ≈ LME fixed effect in balanced designs.
-  # For publication-grade CI replace with manually computed LME intervals.
+  # Window observations — colour by pathway, shape by season
+  geom_point(aes(colour = path_id),
+             alpha = 0.55, size = 1.2) +
+
+  # GLS fixed-effect slope (OLS used for display; slope identical for balanced data)
   geom_smooth(method = "lm", formula = y ~ x,
               colour = "grey15", fill = "grey40",
               linewidth = 0.9, alpha = 0.15) +
 
-  geom_text(
-    data = lm_stats_final,  #mixed_stats, 
-    mapping = aes(label = label),
-    x = Inf, y = Inf, hjust = 1.08, vjust = 1.25,
-    size = 2.0, colour = "grey20", lineheight = 1.3,
-    inherit.aes = FALSE
-  ) +
+  # Per-panel annotation anchored to top-right corner regardless of free scale
+  geom_text(data        = cv_stats,
+            mapping     = aes(label = label),
+            x = Inf, y = Inf, hjust = 1.08, vjust = 1.25,
+            size = 2.0, colour = "grey20", lineheight = 1.3,
+            inherit.aes = FALSE) +
 
   scale_colour_manual(values = path_colours) +
   scale_x_continuous(
-    name   = "|Community \u03b2| (all_taxa, pathway-matched) \u2014 forcing strength",
+    name   = "Community \u03b2 (pathway-matched, signed)",
     labels = scales::label_number(accuracy = 0.01)
   ) +
-  labs(y = "Pairwise response distance  |\u03b2\u1d62 \u2212 \u03b2\u2c7c|") +
+  labs(
+    y        = "CV of taxon \u03b2s  [SD / mean|\u03b2|]",
+    title    = "H3 \u2014 Taxonomic response diversity under contrasting land-use forcing",
+    subtitle = "Negative slope = convergence under cultivated forcing | Positive = winner-loser divergence"
+  ) +
   guides(colour = "none") +
-  theme_sem(base_size = 8, legend_pos = "none") +
-  theme(strip.text = element_text(size = 6.5, face = "bold"),
-        axis.text  = element_text(size = 6))
+  theme_sem(base_size = 8, legend_pos = "right") +
+  theme(
+    strip.text  = element_text(size = 6.5, face = "bold"),
+    axis.text   = element_text(size = 6),
+    legend.text = element_text(size = 6.5)
+  )
 
-p_dist_beta_all
+p_cv
 
-ggsave("../output/Fig3_H3.tiff",
-       p_dist_beta_all,
+ggsave("../output/Fig3_H3_cv.tiff", p_cv,
        width = 24, height = 14, units = "cm", dpi = 300, compression = "lzw")
 ```
 
----
+------------------------------------------------------------------------
 
-### Mixed-model summary table
+### GLS summary table
 
-```{r tbl-h3-lme}
+```{r tbl-h3-cv}
 #| tbl-cap: >
-#|   Mixed-model results: pairwise distance ~ |community β| per causal pathway.
-#|   β = LME fixed-effect slope (ML); SE from the LME t-table; R²m = marginal
-#|   R² (fixed effects only, Nakagawa & Schielzeth 2013); p = parametric p-value
-#|   from the LME t-test, accounting for random effects and AR(1) structure.
-#|   A positive β means taxa diverge more when the land-use contrast is strong.
+#|   GLS results for CV ~ community β across all causal pathways. β = slope on
+#|   the signed, pathway-matched community β; a negative β supports convergence
+#|   (CV decreases as cultivated forcing strengthens). R²m = marginal R²
+#|   (variance explained by the fixed effect alone). p = parametric p-value
+#|   from the GLS t-test, accounting for AR(1) residual autocorrelation.
 
-mixed_stats %>%
-  left_join(select(perm_stats, path_id, perm_fmt, perm_sig), by = "path_id") %>% #if permut
-  left_join(select(path_meta, path_id, label), by = "path_id") %>%
+cv_stats %>%
+  left_join(select(path_meta, path_id), by = "path_id") %>%
   mutate(
     slope_fmt = sprintf("%+.4f", slope),
     se_fmt    = sprintf("%.4f",  se_slope),
-    r2_fmt    = sprintf("%.4f",  r2_marg),
+    r2_fmt    = sprintf("%.4f",  r2),
     n_fmt     = formatC(n_obs, format = "d", big.mark = ",")
   ) %>%
   arrange(match(path_id, pathway_order)) %>%
-  select("Pathway"              = path_id,
-         "\u03b2"               = slope_fmt,
-         "SE"                   = se_fmt,
-         "R\u00b2m"             = r2_fmt,
-         "p (LME)"              = p_fmt,
-         "Sig."                 = sig,
-         "p (perm.)"            = perm_fmt, #if permut
-         "Sig. (perm.)"         = perm_sig, #if permut
-         "N (pair\u00d7window)" = n_fmt) %>%
+  select(
+    "Pathway"              = label,
+    "\u03b2"               = slope_fmt,
+    "SE"                   = se_fmt,
+    "R\u00b2m"             = r2_fmt,
+    "p (GLS)"              = p_fmt,
+    "Sig."                 = sig,
+    "Result"               = result,
+    "N (windows)"          = n_fmt
+  ) %>%
   kbl(format = "html", escape = FALSE,
-      align  = c("l", "r", "r", "r", "r", "l", "r", "l","r")) %>%
+      align  = c("l", "r", "r", "r", "r", "l", "l", "r")) %>%
   kable_styling(bootstrap_options = c("condensed", "hover"),
                 full_width = FALSE, font_size = 12) %>%
   row_spec(0, bold = TRUE, background = "#e8e8e8") %>%
   footnote(
     general = paste0(
-      "Mixed model: dist ~ abs_forcing + (1|window/pair) + AR(1) within pair. ",
-      "ML estimation (nlme::lme). R\u00b2m = marginal R\u00b2 (fixed effects only). ",
-      "Distances winsorised at 1.5\u00d7IQR per pathway. ",
+      "GLS: CV ~ community \u03b2 (signed, pathway-matched) + AR(1). ",
+      "ML estimation (nlme::gls). ",
+      "CV = SD(\u03b2_taxa) / (mean|\u03b2_taxa| + \u03b5), \u03b5 = 1\u00d710\u207b\u2074. ",
+      "Windows with fewer than ", min_taxa_win, " valid taxa excluded. ",
+      "Negative \u03b2 = convergence (CV decreases with cultivated forcing). ",
       "Sig. codes: *** p < 0.001 \u00a0** p < 0.01 \u00a0* p < 0.05 \u00a0. p < 0.10."
     ),
     general_title = "", escape = FALSE, footnote_as_chunk = TRUE
   )
 ```
 
----
+------------------------------------------------------------------------
 
-### LME model diagnostics
+### GLS diagnostics
 
-```{r fig-h3-lme-diagnostics}
-#| label: fig-h3-lme-diagnostics
+```{r fig-h3-diagnostics}
+#| label: fig-h3-diagnostics
 #| fig-cap: >
-#|   **LME residual diagnostics per pathway (H3).** Each row of panels covers
-#|   one pathway. (A) Residuals vs fitted values: random scatter around zero
-#|   indicates linearity and homoscedasticity; a fan or systematic curve flags
-#|   problems. (B) Normal Q-Q of standardised residuals: points should track
-#|   the diagonal; heavy tails indicate non-normality. (C) Scale-location
-#|   (√|standardised residuals| vs fitted): a flat LOESS confirms
-#|   homoscedasticity; a rising line indicates variance increasing with the
-#|   mean. (D) Random-effect Q-Q for the pair-level intercepts: should be
-#|   linear if the normality assumption for random effects holds.
-#| fig-width: 18
-#| fig-height: 22
+#|   **GLS residual diagnostics for CV ~ community β per pathway.**
+#|   (A) Residuals vs fitted values: random scatter around zero indicates
+#|   linearity and homoscedasticity; a systematic curve or fan flags problems.
+#|   (B) Normal Q-Q of standardised residuals: points should track the
+#|   diagonal; heavy tails indicate non-normality. (C) Scale-location
+#|   (√|std. residuals| vs fitted): a flat LOESS confirms homoscedasticity;
+#|   a rising trend indicates variance increasing with the mean. (D) ACF of
+#|   GLS residuals: bars should fall within the confidence ribbon at lag > 1,
+#|   confirming that the AR(1) structure adequately absorbed temporal
+#|   autocorrelation. Persistent bars at lag 2–3 would suggest a higher AR
+#|   order or seasonal structure not captured by the model.
+#| fig-width: 16
+#| fig-height: 16
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LME DIAGNOSTICS
+# GLS DIAGNOSTICS
 #
-# Diagnostics are computed from the fitted LME objects stored in mixed_fits.
-# Four quantities are extracted per model per observation:
+# For each fitted GLS object in cv_fits, four diagnostics are computed:
 #
-#   resid_raw   — marginal (population-level) residuals: y − Xβ̂, ignoring
-#                 random effects. Used for panels A and C.
-#   resid_std   — standardised marginal residuals (divided by residual SD).
-#                 Used for panels A, B, C.
-#   fitted_pop  — population-level fitted values (predict(m, level = 0)).
-#   sqrt_abs    — √|resid_std|, for the scale-location plot.
+#   resid_std   — residuals standardised by their SD (response residuals / SD)
+#   fitted_val  — GLS fitted values
+#   sqrt_abs    — √|resid_std| for the scale-location plot
+#   acf         — sample ACF of raw residuals up to lag 20
 #
-# Panel D uses the BLUPs (best linear unbiased predictors) for the pair-level
-# random intercepts, extracted via ranef(m). Their Q-Q plot tests the
-# normality assumption for the random-effect distribution.
+# The confidence interval for the ACF is the standard ±1.96/√n band under the
+# white-noise null hypothesis.
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Observation-level diagnostic data ─────────────────────────────────────────
-lme_diag_obs <- mixed_fits %>%
+# ── Observation-level diagnostics ─────────────────────────────────────────────
+diag_obs <- cv_fits %>%
   filter(!map_lgl(fit, is.null)) %>%
   mutate(
-    data_out = map2(fit, path_id, function(m, pid) {
+    diag = map2(fit, path_id, function(m, pid) {
+      res <- residuals(m, type = "response")
+      std <- res / sd(res)
       tibble(
-        path_id    = as.character(pid),
-        fitted_pop = predict(m, level = 0),
-        resid_raw  = residuals(m, type = "response"),
-        resid_std  = resid_raw / sd(resid_raw),
-        sqrt_abs   = sqrt(abs(resid_std))
+        path_id   = as.character(pid),
+        fitted    = fitted(m),
+        resid_std = std,
+        sqrt_abs  = sqrt(abs(std))
       )
     })
   ) %>%
-  select(data_out) %>%
-  unnest(data_out) %>%
+  select(diag) %>%
+  unnest(diag) %>%
   mutate(path_id = factor(path_id, levels = pathway_order))
 
-# ── Pair-level random effects (BLUPs) ─────────────────────────────────────────
-lme_diag_re <- mixed_fits %>%
+# ── ACF diagnostics ────────────────────────────────────────────────────────────
+diag_acf <- cv_fits %>%
   filter(!map_lgl(fit, is.null)) %>%
   mutate(
-    re_out = map2(fit, path_id, function(m, pid) {
-      # ranef() returns a list; the innermost level holds pair intercepts
-      re <- ranef(m)
-      re_pair <- re[[length(re)]]   # innermost grouping level = pair_lab
-      tibble(path_id  = as.character(pid),
-             re_value = re_pair[, 1])
+    acf_out = map2(fit, path_id, function(m, pid) {
+      a  <- acf(residuals(m), plot = FALSE, lag.max = 20)
+      ci <- qnorm(0.975) / sqrt(length(residuals(m)))
+      tibble(
+        path_id = as.character(pid),
+        lag     = as.integer(a$lag[-1]),
+        acf     = as.numeric(a$acf[-1]),
+        ci      = ci
+      )
     })
   ) %>%
-  select(re_out) %>%
-  unnest(re_out) %>%
+  select(acf_out) %>%
+  unnest(acf_out) %>%
   mutate(path_id = factor(path_id, levels = pathway_order))
 
 
 # ── Panel A: Residuals vs Fitted ──────────────────────────────────────────────
-p_rv <- ggplot(lme_diag_obs, aes(x = fitted_pop, y = resid_std)) +
+p_da <- ggplot(diag_obs, aes(x = fitted, y = resid_std, colour = path_id)) +
   facet_wrap(~ path_id, nrow = 2, scales = "free",
              labeller = as_labeller(pathway_labels_h3)) +
-  geom_hline(yintercept = 0, colour = "grey55", linewidth = 0.35,
-             linetype = "dashed") +
-  geom_point(aes(colour = path_id), alpha = 0.15, size = 0.5, shape = 16) +
+  geom_hline(yintercept = 0, colour = "grey55", linetype = "dashed",
+             linewidth = 0.35) +
+  geom_point(alpha = 0.30, size = 0.7, shape = 16) +
   geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
               colour = "firebrick", linewidth = 0.7) +
   scale_colour_manual(values = path_colours) +
-  labs(x = "Fitted values (population level)",
-       y = "Standardised residuals",
-       title = "A \u2014 Residuals vs Fitted  [check: linearity & homoscedasticity]") +
+  labs(x = "Fitted values", y = "Std. residuals",
+       title = "A \u2014 Residuals vs Fitted  [linearity & homoscedasticity]") +
   guides(colour = "none") +
   theme_sem(base_size = 7) +
   theme(strip.text = element_text(size = 5.5, face = "bold"),
-        axis.text  = element_text(size = 5.5),
         plot.title = element_text(size = 7.5))
 
-# ── Panel B: Normal Q-Q of standardised residuals ────────────────────────────
-p_qq <- ggplot(lme_diag_obs, aes(sample = resid_std)) +
+# ── Panel B: Normal Q-Q ───────────────────────────────────────────────────────
+p_db <- ggplot(diag_obs, aes(sample = resid_std, colour = path_id)) +
   facet_wrap(~ path_id, nrow = 2, scales = "free",
              labeller = as_labeller(pathway_labels_h3)) +
-  stat_qq(aes(colour = path_id), alpha = 0.15, size = 0.5, shape = 16) +
-  stat_qq_line(colour = "grey30", linewidth = 0.6, linetype = "dashed") +
+  stat_qq(alpha = 0.30, size = 0.7, shape = 16) +
+  stat_qq_line(colour = "grey30", linewidth = 0.55, linetype = "dashed") +
   scale_colour_manual(values = path_colours) +
-  labs(x = "Theoretical quantiles",
-       y = "Standardised residuals",
-       title = "B \u2014 Q-Q residuals  [check: normality]") +
+  labs(x = "Theoretical quantiles", y = "Std. residuals",
+       title = "B \u2014 Normal Q-Q  [normality of residuals]") +
   guides(colour = "none") +
   theme_sem(base_size = 7) +
   theme(strip.text = element_text(size = 5.5, face = "bold"),
-        axis.text  = element_text(size = 5.5),
         plot.title = element_text(size = 7.5))
 
 # ── Panel C: Scale-Location ───────────────────────────────────────────────────
-p_sl <- ggplot(lme_diag_obs, aes(x = fitted_pop, y = sqrt_abs)) +
+p_dc <- ggplot(diag_obs, aes(x = fitted, y = sqrt_abs, colour = path_id)) +
   facet_wrap(~ path_id, nrow = 2, scales = "free",
              labeller = as_labeller(pathway_labels_h3)) +
-  geom_point(aes(colour = path_id), alpha = 0.15, size = 0.5, shape = 16) +
+  geom_point(alpha = 0.30, size = 0.7, shape = 16) +
   geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
               colour = "firebrick", linewidth = 0.7) +
   scale_colour_manual(values = path_colours) +
-  labs(x = "Fitted values (population level)",
-       y = expression(sqrt("|Std. residuals|")),
-       title = "C \u2014 Scale-Location  [check: homoscedasticity]") +
+  labs(x = "Fitted values", y = expression(sqrt("|Std. residuals|")),
+       title = "C \u2014 Scale-Location  [homoscedasticity]") +
   guides(colour = "none") +
   theme_sem(base_size = 7) +
   theme(strip.text = element_text(size = 5.5, face = "bold"),
-        axis.text  = element_text(size = 5.5),
         plot.title = element_text(size = 7.5))
 
-# ── Panel D: Random-effect Q-Q (pair intercepts) ─────────────────────────────
-p_re_qq <- ggplot(lme_diag_re, aes(sample = re_value)) +
-  facet_wrap(~ path_id, nrow = 2, scales = "free",
+# ── Panel D: ACF of residuals ─────────────────────────────────────────────────
+p_dd <- ggplot(diag_acf, aes(x = lag, y = acf, colour = path_id,
+                              fill = path_id)) +
+  facet_wrap(~ path_id, nrow = 2, scales = "free_y",
              labeller = as_labeller(pathway_labels_h3)) +
-  stat_qq(aes(colour = path_id), alpha = 0.50, size = 0.9, shape = 16) +
-  stat_qq_line(colour = "grey30", linewidth = 0.6, linetype = "dashed") +
+  geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey40") +
+  geom_ribbon(aes(ymin = -ci, ymax = ci), alpha = 0.12, colour = NA) +
+  geom_segment(aes(xend = lag, yend = 0), linewidth = 0.6) +
+  geom_point(size = 1.1) +
   scale_colour_manual(values = path_colours) +
-  labs(x = "Theoretical quantiles",
-       y = "Pair-level random intercept (BLUP)",
-       title = "D \u2014 Q-Q random effects  [check: normality of pair intercepts]") +
-  guides(colour = "none") +
+  scale_fill_manual(values   = path_colours) +
+  labs(x = "Lag", y = "ACF",
+       title = "D \u2014 ACF of GLS residuals  [residual autocorrelation after AR(1)]") +
+  guides(colour = "none", fill = "none") +
   theme_sem(base_size = 7) +
   theme(strip.text = element_text(size = 5.5, face = "bold"),
-        axis.text  = element_text(size = 5.5),
         plot.title = element_text(size = 7.5))
 
-# ── Assemble 2×2 grid ─────────────────────────────────────────────────────────
-(p_rv + p_qq) / (p_sl + p_re_qq) +
+# ── Assemble 4-panel grid ─────────────────────────────────────────────────────
+(p_da / p_db / p_dc / p_dd) +
   plot_annotation(
-    title    = "LME diagnostics \u2014 dist ~ |community \u03b2| per pathway",
+    title    = "GLS diagnostics \u2014 CV ~ community \u03b2 per pathway",
     subtitle = paste(
-      "A: non-flat LOESS \u2192 non-linearity or heteroscedasticity.",
-      "B/D: heavy Q-Q tails \u2192 non-normal residuals or random effects.",
-      "C: rising LOESS \u2192 variance increases with fitted values.",
-      sep = "  \u2502  "
+      "A/C: non-flat LOESS \u2192 heteroscedasticity.",
+      "B: heavy Q-Q tails \u2192 non-normal residuals.",
+      "D: bars outside ribbon at lag > 1 \u2192 residual autocorrelation.",
+      sep = "  |  "
     ),
     theme = theme(
       plot.title    = element_text(size = 9, face = "bold"),
@@ -1387,5 +1218,3 @@ p_re_qq <- ggplot(lme_diag_re, aes(sample = re_value)) +
     )
   )
 ```
-
-
