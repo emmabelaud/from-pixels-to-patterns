@@ -702,7 +702,7 @@ data_sem <- data_sem %>%
 
 ------------------------------------------------------------------------
 
-## 8. Export
+## 7. Export
 
 ```{r export}
 data_sem$date <- format(data_sem$date, "%Y-%m-%d %H:%M:%S")
@@ -718,3 +718,59 @@ jsonlite::write_json(
   pretty = TRUE
 )
 ```
+
+------------------------------------------------------------------------
+
+## 8. Data summary
+
+```{r data-summary}
+#| echo: false
+
+# ── DATA SUMMARY ───────────────────────────────────────────────────────
+
+n_images      <- nrow(root_density_raw)
+period_start  <- min(df$date, na.rm = TRUE)
+period_end    <- max(df$date, na.rm = TRUE)
+period_days   <- as.numeric(difftime(period_end, period_start, units = "days"))
+
+n_occ_raw     <- nrow(df_raw %>% filter(!is.na(Predicted.class)))
+n_occ_fauna   <- nrow(df)
+
+n_taxa        <- length(unique(taxa_list$Predicted.class))
+taxa_names    <- paste(sort(unique(taxa_list$Predicted.class)), collapse = ", ")
+
+n_scanners    <- length(unique(df$scanner))
+scanners_A    <- length(unique(df$scanner[df$position == "A"]))
+scanners_C    <- length(unique(df$scanner[df$position == "C"]))
+
+n_rows_total  <- nrow(data_sem)
+n_rows_na     <- sum(is.na(data_sem$all_taxa))
+prop_missing  <- round(n_rows_na / n_rows_total * 100, 1)
+
+missing_by_scanner <- data_sem %>%
+  group_by(scanner, position) %>%
+  summarise(
+    n_total   = n(),
+    n_missing = sum(is.na(all_taxa)),
+    pct_miss  = round(n_missing / n_total * 100, 1),
+    .groups   = "drop"
+  ) %>%
+  arrange(position, scanner)
+
+cat(sprintf("Period          : %s → %s (%.0f days)\n",
+            format(period_start, "%Y-%m-%d"),
+            format(period_end,   "%Y-%m-%d"), period_days))
+cat(sprintf("Images (total)  : %s\n",   format(n_images,    big.mark = ",")))
+cat(sprintf("Occ. raw        : %s\n",   format(n_occ_raw,   big.mark = ",")))
+cat(sprintf("Occ. filtered   : %s\n",   format(n_occ_fauna, big.mark = ",")))
+cat(sprintf("Taxa retained   : %d  [%s]\n", n_taxa, taxa_names))
+cat(sprintf("Scanners        : %d  (A=%d treed, C=%d cultivated)\n",
+            n_scanners, scanners_A, scanners_C))
+cat(sprintf("SEM grid rows   : %s\n",   format(n_rows_total, big.mark = ",")))
+cat(sprintf("Missing images  : %s / %s  (%.1f%%)\n",
+            format(n_rows_na, big.mark = ","),
+            format(n_rows_total, big.mark = ","), prop_missing))
+cat("\nMissing rate per scanner:\n")
+print(as.data.frame(missing_by_scanner), row.names = FALSE)
+```
+
