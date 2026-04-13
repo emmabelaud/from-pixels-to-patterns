@@ -69,7 +69,7 @@ mc2_pred <- microclimate_index[2]
 # ── Land-use colour palette ───────────────────────────────────────────────────
 # Dark green = treed plots (A); burnt orange = cultivated plots (C).
 # Applied consistently to every figure that distinguishes land-use type.
-pos_colours <- c("Treed (A)" = "#3d5a3e", "Cultivated (C)" = "#c1603a")
+pos_colours <- c("Treed (A)" = "#717F55", "Cultivated (C)" = "#FF994E")
 
 
 # ── Causal pathway metadata ───────────────────────────────────────────────────
@@ -86,12 +86,12 @@ pos_colours <- c("Treed (A)" = "#3d5a3e", "Cultivated (C)" = "#c1603a")
 #                dotted = three-step indirect (lu → X → root → fauna)
 path_meta <- tribble(
   ~path_id,         ~label,                                                 ~colour,   ~ltype,
-  "direct",         "Direct (lu\u2192fauna)",                               "#DCB879", "solid",
-  "via_mc1",        paste0("lu\u2192", mc1_pred, "\u2192fauna"),            "#c2cab2", "dashed",
-  "via_mc2",        paste0("lu\u2192", mc2_pred, "\u2192fauna"),            "#555d45", "dashed",
-  "via_root",       "lu\u2192root\u2192fauna",                              "#955f42", "dashed",
-  "via_mc1_root",   paste0("lu\u2192", mc1_pred, "\u2192root\u2192fauna"),  "#dea88b", "dotted",
-  "via_mc2_root",   paste0("lu\u2192", mc2_pred, "\u2192root\u2192fauna"),  "#d1855c", "dotted",
+  "direct",         "Direct (lu\u2192fauna)",                               "#F9BB05", "solid",
+  "via_mc1",        paste0("lu\u2192", mc1_pred, "\u2192fauna"),            "#BCD094", "solid",
+  "via_mc2",        paste0("lu\u2192", mc2_pred, "\u2192fauna"),            "#717F55", "solid",
+  "via_root",       "lu\u2192root\u2192fauna",                              "#C45300", "solid",
+  "via_mc1_root",   paste0("lu\u2192", mc1_pred, "\u2192root\u2192fauna"),  "#FF7E1F", "solid",
+  "via_mc2_root",   paste0("lu\u2192", mc2_pred, "\u2192root\u2192fauna"),  "#FF994E", "solid",
   "total_indirect", "Total indirect",                                        "#999999", "solid",
   "total_effect",   "Total effect",                                          "#444444", "solid"
 )
@@ -703,32 +703,30 @@ h2_marginal <- h2_ts %>%
 ```{r fig-h2-combined}
 #| label: fig-h2-combined
 #| fig-cap: >
-#|   **Figure 2. Causal pathway decomposition of the land-use effect on soil
+#|   **Causal pathway decomposition of the land-use effect on soil
 #|   invertebrate activity.**
 #|   (A) Marginal distribution of standardised β-products across all 144 rolling
 #|   windows per causal pathway. Thick bar = interquartile range (IQR); thin bar
 #|   = 95% range (2.5th–97.5th percentile, after winsorising); open circle =
-#|   rolling-window median. Open diamond (nudged right) = full time-series
-#|   piecewise SEM estimate ± 1 SE (first-order product approximation). A
-#|   global estimate falling outside the rolling-window IQR indicates that the
-#|   full-series fit is influenced by seasonal extremes away from the typical
-#|   within-season relationship.
+#|   rolling-window median; filled circle (nudged right) = full time-series
+#|   piecewise SEM estimate ± 1 SE (first-order product approximation).
 #|   (B) LOESS-smoothed (span = 0.30, surface = "direct") time series of
 #|   standardised β-products for the community (all_taxa). Line colour and
 #|   type encode the causal route: solid = direct effect or composite pathway
 #|   (total indirect / total effect); dashed = two-step indirect (lu → X →
 #|   fauna); dotted = three-step indirect (lu → X → root → fauna). Shaded
 #|   bands = meteorological seasons. Dotted red vertical lines mark key
-#|   agricultural interventions in the cultivated zone. 
-#|   Dotted green vertical lines mark irrigation events in the cultivated zone. 
+#|   agricultural interventions in the cultivated zone; dotted green vertical
+#|   lines mark irrigation events.
+#|   Sign convention: A = 0, C = 1 — negative values indicate a stronger
+#|   effect in the treed system. Both panels share the same y-axis. 
 #|   Sign convention:
 #|   A = 0, C = 1 — negative values indicate a stronger effect in the treed
 #|   system. Both panels share the same y-axis.
 #| fig-width: 16
 #| fig-height: 6
 
-# Shape scale: 21 = filled circle (rolling median); 23 = diamond (global model).
-shape_values <- c(median = 21, global = 23)
+shape_values <- c(median = 21, global = 21)
 
 # Phantom data for the shape legend: coordinates are NA so nothing is drawn,
 # but ggplot still emits one legend entry per shape.
@@ -741,7 +739,7 @@ legend_dummy <- tibble(
 # ── Panel A: marginal summary ─────────────────────────────────────────────────
 # The global-model diamond is nudged 0.28 units right so the two symbols are
 # visually separable. Right border suppressed to merge with panel B.
-p_marginal <- ggplot(h2_marginal, aes(colour = path_id)) +
+p_marginal <- ggplot(h2_marginal, aes(colour = path_id, fill = path_id)) +
   geom_hline(yintercept = 0, linetype = "dashed",
              colour = "grey55", linewidth = 0.35) +
   # Thin bar: 95% range
@@ -757,12 +755,12 @@ p_marginal <- ggplot(h2_marginal, aes(colour = path_id)) +
   geom_linerange(aes(x    = label,
                      ymin = b_global - se_global,
                      ymax = b_global + se_global),
-                 position  = position_nudge(x = 0.28),
+                 #position  = position_nudge(x = 0.28),
                  linewidth = 0.5, alpha = 0.35, na.rm = TRUE) +
-  # Global model estimate (open diamond, nudged right)
-  geom_point(aes(x = label, y = b_global, shape = "global"),
-             position = position_nudge(x = 0.28),
-             size = 2.2, fill = "white", stroke = 0.8, na.rm = TRUE) +
+  # Global model estimate
+  geom_point(aes(x = label, y = b_global, shape = "global", fill = path_id), 
+             #position = position_nudge(x = 0.28),
+             size = 2.2, na.rm = TRUE) +
   # Phantom layer — generates shape legend entries without drawing points
   geom_point(data    = legend_dummy,
              mapping = aes(x = x, y = y, shape = shape),
@@ -771,15 +769,17 @@ p_marginal <- ggplot(h2_marginal, aes(colour = path_id)) +
   scale_shape_manual(
     name   = NULL,
     values = shape_values,
+    breaks = c("median", "global"), 
     labels = c(median = "Rolling median (IQR / 95%)",
                global = "Global model (\u00b1 1 SE)"),
     guide  = guide_legend(
-      override.aes = list(fill   = c("white", "white"),
-                          colour = "grey30",
-                          size   = c(2.4, 2.2))
-    )
-  ) +
+      override.aes = list(
+        fill   = c("white", "grey30"), # Now "white" maps to median, "grey30" to global
+        colour = "grey30",
+        size   = c(2.4, 2.2)           # Now 2.4 maps to median, 2.2 to global
+      ))) +
   scale_colour_manual(values = path_colours, guide = "none") +
+  scale_fill_manual(values = path_colours, guide = "none") +
   scale_x_discrete(limits = levels(h2_marginal$label),
                    labels  = path_labels_short) +
   coord_cartesian(ylim = shared_ylim_h2) +
@@ -851,7 +851,7 @@ h2_combined <- h2_combined + plot_annotation(tag_levels = "A")
 h2_combined
 
 ggsave("../output/Fig2_H2_combined.tiff", h2_combined,
-       width = 28, height = 16, units = "cm", dpi = 300, compression = "lzw")
+       width = 24, height = 12, units = "cm", dpi = 300, compression = "lzw")
 ```
 
 ------------------------------------------------------------------------
@@ -1037,7 +1037,7 @@ gls_results <- h3_cv %>%
       p     = s["community_beta", "p-value"],
       # Formatted annotation: slope ± significance stars
       label = paste0(
-        "\u03b2 = ", round(s["community_beta", "Value"], 3),
+        "slope = ", round(s["community_beta", "Value"], 3),
         dplyr::case_when(
           s["community_beta", "p-value"] < 0.001 ~ "***",
           s["community_beta", "p-value"] < 0.01  ~ "**",
@@ -1137,14 +1137,14 @@ make_dual_panel <- function(pid, show_xaxis = TRUE) {
     # LOESS |community β| smoother rescaled to CV axis (grey dashed)
     geom_smooth(aes(y = rescale_b(community_beta)),
                 method = "loess", span = 0.10, se = FALSE,
-                colour = "grey30", linetype = "dashed",
-                linewidth = 0.65) +
+                colour = "grey40", linetype = "solid",
+                linewidth = 0.45) +
     scale_y_continuous(
-      name     = paste0("CV  [", path_lbl, "]"),
+      name     = paste0("CV"),
       limits   = cv_rng,
       sec.axis = sec_axis(
         transform = rescale_cv_b,
-        name      = "|Community \u03b2| (all_taxa)"
+        name      = "|Community \u03b2|)"
       )
     ) +
     scale_x_date(
@@ -1155,7 +1155,7 @@ make_dual_panel <- function(pid, show_xaxis = TRUE) {
     labs(x = NULL) +
     theme_sem(base_size = 8) +
     theme(
-      axis.title.y       = element_text(colour = path_col, size = 7),
+      axis.title.y       = element_text(colour = path_col, size = 9),
       axis.title.y.right = element_text(colour = "grey35", size = 7),
       axis.text.y        = element_text(size = 6),
       axis.text.y.right  = element_text(colour = "grey35", size = 6),
@@ -1212,7 +1212,7 @@ p_scatter <- ggplot(
   aes(x = community_beta, y = cv, colour = path_id)
 ) +
   facet_wrap(~ path_id, ncol = 1,
-             labeller = as_labeller(path_labels), scale="free") +
+             labeller = as_labeller(path_labels)) +
   geom_point(alpha = 0.25, size = 1) +
   geom_smooth(
     method    = "lm",
@@ -1225,14 +1225,19 @@ p_scatter <- ggplot(
   # GLS slope + significance annotation (top-left of each facet)
   geom_text(
     data        = annot_pos,
-    mapping     = aes(x = x, y = y, label = label),
+    mapping     = aes(label = label),
+    x           = Inf, 
+    y           = Inf, 
+    hjust       = 1.1,  
+    vjust       = 1.5,              
     inherit.aes = FALSE,
-    hjust = 0, vjust = 1.4,
-    size = 2.5, colour = "black", fontface = "italic"
-  ) +
+    size        = 3, 
+    colour      = "black", 
+    fontface    = "italic"
+  )+
   scale_colour_manual(values = path_colours, guide = "none") +
   labs(
-    x = "|Community \u03b2| (all_taxa)",
+    x = "|Community \u03b2|",
     y = "CV across taxa"
   ) +
   theme_sem(base_size = 8) +
@@ -1251,7 +1256,7 @@ p_via_mc1   <- make_dual_panel("via_mc1",         show_xaxis = FALSE)
 p_via_mc2 <- make_dual_panel("via_mc2",         show_xaxis = FALSE)
 p_via_root <- make_dual_panel("via_root",         show_xaxis = FALSE)
 p_via_mc1_root   <- make_dual_panel("via_mc1_root",         show_xaxis = FALSE)
-p_via_mc2_root <- make_dual_panel("via_mc2_root",         show_xaxis = FALSE)
+p_via_mc2_root <- make_dual_panel("via_mc2_root",         show_xaxis = TRUE)
 
 
 temporal_stack <- (p_direct / p_indirect/ p_via_mc1 / p_via_mc2 /p_via_root/p_via_mc1_root/p_via_mc2_root) 

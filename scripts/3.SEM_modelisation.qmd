@@ -20,20 +20,15 @@ execute:
 
 Third step of the SEM pipeline, following:
 
-1. `data_preparation.qmd` — assembles and quality-controls the SEM database
-2. `sem_diagnostic.qmd` — selects the optimal rolling-window duration,
-   variance-stabilising transformation, and set of diagnostically valid windows
+1.  `data_preparation.qmd` — assembles and quality-controls the SEM database
+2.  `sem_diagnostic.qmd` — selects the optimal rolling-window duration, variance-stabilising transformation, and set of diagnostically valid windows
 
-This script performs **all modelling** and writes the result databases that
-`4_results_visualisation.qmd` reads for figures and tables.
-**No figures are produced here** — keeping computation and presentation
-strictly separated makes it easy to re-run the visualisation without
-refitting any model.
+This script performs **all modelling** and writes the result databases that `4_results_visualisation.qmd` reads for figures and tables. **No figures are produced here** — keeping computation and presentation strictly separated makes it easy to re-run the visualisation without refitting any model.
 
 ## Outputs produced
 
 | File                       | Content                                        |
-|------------------------|--------------------------------------------|
+|----------------------------|------------------------------------------------|
 | `H1_adjusted_values.csv`   | Per-observation RE-adjusted faunal counts      |
 | `H1_model_summary.csv`     | Fixed-effect estimate, Hedge's g, p-value      |
 | `DAG_coefficients.csv`     | Full-dataset psem path coefficients (all_taxa) |
@@ -42,19 +37,16 @@ refitting any model.
 | `indirect_effects.csv`     | Computed indirect effects per window × taxon   |
 | `H1_results_database.csv`  | Rolling-window H1 estimates, all responses     |
 
-## SEM structure 
+## SEM structure
 
 $$\text{microclimate}_i \leftarrow \beta_i \cdot \text{land\_use}, \quad i=1,2$$ $$\text{Root} \leftarrow \beta_3 \cdot \text{mc}_1 + \beta_4 \cdot \text{mc}_2 + \beta_5 \cdot \text{lu}$$ $$\text{Fauna} \leftarrow \beta_6 \cdot \text{mc}_1 + \beta_7 \cdot \text{mc}_2 + \beta_8 \cdot \text{Root} + \beta_9 \cdot \text{lu}$$
 
-The residual covariance `microclimate_1 %~~% microclimate_2` is included
-explicitly in the psem to acknowledge that the two microclimate indices share
-physical drivers beyond land use (e.g. weather events, aspect). Omitting it
-would force any shared variance into the land_use path coefficients.
+The residual covariance `microclimate_1 %~~% microclimate_2` is included explicitly in the psem to acknowledge that the two microclimate indices share physical drivers beyond land use (e.g. weather events, aspect). Omitting it would force any shared variance into the land_use path coefficients.
 
 ## Random structures
 
 | Equation | Random structure | Rationale |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | microclimate \~ land_use | `~ 1 \| depth` | No orientation recorded for sensors |
 | root / fauna \~ … | `~ 1 \| orientation/depth` | Depth nested in orientation |
 

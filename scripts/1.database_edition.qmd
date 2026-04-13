@@ -89,7 +89,6 @@ tol_1d_secs     <- (0.5 + step_hours / 48) * 86400  # ±12 h + half-step margin
 NATIVE_HOURS    <- c(0, 6, 12, 18)
 ```
 
-
 ------------------------------------------------------------------------
 
 ## 2. Fauna data
@@ -103,7 +102,7 @@ df_raw <- read.csv("../data/fauna_data.csv",
                    sep = ",",
                    na.strings = c("", "NA", "background"))
 
-df <- df_raw %>%
+df_raw <- df_raw %>%
   # Remove rows without a valid prediction
   filter(!is.na(Predicted.class)) %>%
   # Remove non-faunal, ambiguous, or composite classes
@@ -123,7 +122,7 @@ df <- df_raw %>%
     minute = minute(date)
   ) %>%
   # Restrict to the main study period
-  filter(date > "2024-03-01 00:00:00") %>%
+  filter(date > "2024-04-01 00:00:00") %>%
   # Keep only the four canonical daily scan times
   filter(minute == 0, hour %in% NATIVE_HOURS)
 ```
@@ -180,7 +179,7 @@ rename_map <- c(
 
 # Filter observations: recode promoted taxa, keep leaves only,
 # and retain taxa representing ≥ 8 % of all observations
-taxa_list <- df %>%
+taxa_list <- df_raw %>%
   mutate(Predicted.class = ifelse(
     Predicted.class %in% names(rename_map),
     rename_map[Predicted.class],
@@ -239,7 +238,7 @@ filter_taxa_df <- function(df, filter_taxa = TRUE, min_occurrences = 3000) {
 }
 
 # Apply without occurrence filter (keep all taxa)
-df_filtered <- filter_taxa_df(df, filter_taxa = FALSE)
+df_filtered <- filter_taxa_df(df_raw, filter_taxa = FALSE)
 ```
 
 ------------------------------------------------------------------------
@@ -250,11 +249,11 @@ Creates a full time × scanner grid, counts detections per taxon per image, and 
 
 ```{r abundance-matrix}
 # Grid at the chosen time step
-seq_time <- seq(floor_date(min(df$date), TIME_STEP),
-                floor_date(max(df$date), TIME_STEP),
+seq_time <- seq(floor_date(min(df_raw$date), TIME_STEP),
+                floor_date(max(df_raw$date), TIME_STEP),
                 by = TIME_STEP)
 
-complete_grid <- expand_grid(date = seq_time, scanner = unique(df$scanner))
+complete_grid <- expand_grid(date = seq_time, scanner = unique(df_raw$scanner))
 
 # Aggregate counts to the chosen resolution before pivoting
 df_complete <- df_filtered %>%
@@ -728,20 +727,20 @@ jsonlite::write_json(
 
 # ── DATA SUMMARY ───────────────────────────────────────────────────────
 
-n_images      <- nrow(root_density_raw)
-period_start  <- min(df$date, na.rm = TRUE)
-period_end    <- max(df$date, na.rm = TRUE)
+n_images      <- nrow(df_raw %>% select(image_name) %>% unique())
+period_start  <- min(df_raw$date, na.rm = TRUE)
+period_end    <- max(df_raw$date, na.rm = TRUE)
 period_days   <- as.numeric(difftime(period_end, period_start, units = "days"))
 
-n_occ_raw     <- nrow(df_raw %>% filter(!is.na(Predicted.class)))
-n_occ_fauna   <- nrow(df)
+n_occ_fauna     <- nrow(df_raw)
+n_occ_fauna_filtered   <- nrow(taxa_list)
 
 n_taxa        <- length(unique(taxa_list$Predicted.class))
 taxa_names    <- paste(sort(unique(taxa_list$Predicted.class)), collapse = ", ")
 
-n_scanners    <- length(unique(df$scanner))
-scanners_A    <- length(unique(df$scanner[df$position == "A"]))
-scanners_C    <- length(unique(df$scanner[df$position == "C"]))
+n_scanners    <- length(unique(df_raw$scanner))
+scanners_A    <- length(unique(df_raw$scanner[df_raw$position == "A"]))
+scanners_C    <- length(unique(df_raw$scanner[df_raw$position == "C"]))
 
 n_rows_total  <- nrow(data_sem)
 n_rows_na     <- sum(is.na(data_sem$all_taxa))
@@ -761,8 +760,8 @@ cat(sprintf("Period          : %s → %s (%.0f days)\n",
             format(period_start, "%Y-%m-%d"),
             format(period_end,   "%Y-%m-%d"), period_days))
 cat(sprintf("Images (total)  : %s\n",   format(n_images,    big.mark = ",")))
-cat(sprintf("Occ. raw        : %s\n",   format(n_occ_raw,   big.mark = ",")))
-cat(sprintf("Occ. filtered   : %s\n",   format(n_occ_fauna, big.mark = ",")))
+cat(sprintf("Occ. raw        : %s\n",   format(n_occ_fauna,   big.mark = ",")))
+cat(sprintf("Occ. filtered   : %s\n",   format(n_occ_fauna_filtered, big.mark = ",")))
 cat(sprintf("Taxa retained   : %d  [%s]\n", n_taxa, taxa_names))
 cat(sprintf("Scanners        : %d  (A=%d treed, C=%d cultivated)\n",
             n_scanners, scanners_A, scanners_C))
@@ -773,4 +772,3 @@ cat(sprintf("Missing images  : %s / %s  (%.1f%%)\n",
 cat("\nMissing rate per scanner:\n")
 print(as.data.frame(missing_by_scanner), row.names = FALSE)
 ```
-

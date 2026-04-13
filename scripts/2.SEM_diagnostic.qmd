@@ -30,7 +30,7 @@ Its outputs feed directly into:
 ## What this script produces
 
 | Output | File | Description |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | Full benchmark table | `benchmark_results_database.csv` | Diagnostic statistics for every parameter combination × response variable |
 | Selected parameters | `model_parameters.txt` | Optimal window, completeness threshold, and transformations (JSON) |
 | Valid window list | `selected_windows.txt` | Dates of windows passing all diagnostic thresholds |
@@ -67,7 +67,7 @@ The optimal configuration is chosen by a **two-step procedure**:
 ## Diagnostic thresholds
 
 | Diagnostic | Metric | Threshold | Rationale |
-|----------------|----------------|:----------------------:|----------------|
+|----|----|:--:|----|
 | Heteroscedasticity | Spearman ρ(\|res\|, fitted) | \< 0.4 | Monotone association between residual magnitude and fitted values indicates variance non-constancy |
 | Skewness | \|skewness(normalised residuals)\| | \< 1.5 | Departure from symmetry inflates Type I error for t-tests on fixed effects |
 | Collinearity | max VIF across continuous predictors | \< 5 | VIF \> 5 inflates SE of individual path coefficients; `land_use` excluded as binary |
@@ -120,7 +120,6 @@ pipeline_cfg <- if (file.exists("../output/pipeline_config.json")) {
 }
 step_hours    <- pipeline_cfg$step_hours
 steps_per_day <- pipeline_cfg$steps_per_day
-
 ```
 
 ------------------------------------------------------------------------

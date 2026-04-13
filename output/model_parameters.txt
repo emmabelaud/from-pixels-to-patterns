@@ -3,6 +3,6 @@
   "selected_min_rate": [0.4],
   "transform_root": ["log"],
   "transform_fauna": ["log"],
-  "transform_microclimate_1": ["sqrt"],
-  "transform_microclimate_2": ["sqrt_plus_one"]
+  "transform_microclimate_1": ["hellinger"],
+  "transform_microclimate_2": ["hellinger"]
 }
