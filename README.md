@@ -1,74 +1,73 @@
-# From pixels to patterns : **High-throughput in-situ imaging unveils soil fauna dynamics in agroforestry systems**
-
-------------------------------------------------------------------------
-
-This repository contains the R scripts associated with the publication *"From pixels to patterns: high-throughput in-situ imaging unveils soil fauna dynamics over a year in agroforestry systems"*, currently in preparation. The study uses continuous in situ imaging at high temporal resolution to investigate how land-use shapes the environmental drivers of soil invertebrate activity in a Mediterranean agroforestry context.
-
-------------------------------------------------------------------------
+## Land-use effects on soil fauna are temporally unstable
 
 ## Study description
 
-Soil invertebrate communities were monitored at 6-hour resolution over nearly two years using underground scanners deployed across two contrasted land-use positions within the same agroforestry system: position **C** (managed — cultivated cover) and position **A** (unmanaged — tree cover with herbaceous vegetation). By combining faunal activity time series with continuous measurements of root dynamics and paired microclimate indices, we apply a rolling-window piecewise SEM to characterise both the direction and the temporal variability of causal pathways linking edaphic conditions to soil faunal activity. The rolling-window approach — fitting the model repeatedly on successive overlapping time windows rather than on the full series — is central to the study design: it yields a distribution of standardised path coefficients over time, capturing how the strength and sign of causal links fluctuate across seasons and disturbance events.
+Soil invertebrate communities were monitored at 6-hour resolution over nearly two years using eight buried scanners deployed across two contrasted land-use positions within the same Mediterranean agroforestry system: position **A** (unmanaged — treed cover with permanent herbaceous vegetation) and position **C** (managed — open cultivated area). By combining faunal activity time series with continuous measurements of root dynamics and paired microclimate indices, we apply a rolling-window piecewise structural equation model (pSEM) to characterise both the direction and the temporal variability of causal pathways linking edaphic conditions to soil faunal activity.
+
+The rolling-window approach — fitting the model on successive overlapping 14-day windows advanced in daily steps rather than on the full time series — is central to the study design. It yields a distribution of standardised path coefficients over time, capturing how the strength and sign of causal links fluctuate across seasons and in direct response to management events. A divergence index is additionally computed per window to track whether land-use forcing compresses or sustains inter-taxon response heterogeneity.
 
 ------------------------------------------------------------------------
 
 ## Study site
 
-The study was conducted at the experimental agroforestry site DIAMs (Dispositif Instrumenté en Agroforesterie Méditerranéenne sous contrainte hydrique) established in 2017 at the experimental station of INRAe (UE Diascope, Mauguio, France, 43.612°N; 3.976°E), under a semi-arid Mediterranean climate characterized by dry, hot summers and mild, wet winters (mean annual temperature 15.7 °C, mean annual precipitation 511 mm (Martin-Blangy et al., 2025). The soils are classified as Skeletic Rhodic Luvisols (IUSS Working group WRB 2014), due to the high proportions of stones (60% and more), a red color and a clayed layer (\>47%) deeper than 100 cm (Siegwart et al. 2023).
+The study was conducted at the experimental agroforestry site **DIAMs** (*Dispositif Instrumenté en Agroforesterie Méditerranéenne sous contrainte hydrique*) established in 2017 at the INRAE experimental station UE Diascope (Mauguio, Hérault, France; 43.612°N, 3.976°E), under a semi-arid Mediterranean climate (mean annual temperature 15.7 °C, mean annual precipitation 511 mm). Soils are classified as Skeletic Rhodic Luvisols with high stone content (\> 60%) and a clay-rich horizon below 100 cm.
 
-The system combines annual crop rotations with rows of black locust (Robinia pseudoacacia L.) spaced 17 m apart, each row bordered by a 2 m-wide permanent grass strip maintained under the canopy. During the 2023–2024 cropping season, durum wheat (Triticum durum Desf.) was sown on 14 December 2023 and harvested on 8 July 2024, followed by sorghum (Sorghum bicolor (L.) Moench) sown on 15 July, mown on 22 November, and shallow-tilled on 25 November 2024. To ensure establishment, the sorghum was irrigated three times (July 17, July 22, and Aug 12, 2024). Chickpea (Cicer arietinum L.) was subsequently sown on 14 March 2025 and harvest on 10 July 2025. The two land-use types compared throughout this study are hereafter referred to as treed (areas located directly beneath tree rows) and cultivated (areas located in the open cropped area) located at 4 m far from the tree rows, at least.
+The system combines annual crop rotations with rows of black locust (*Robinia pseudoacacia* L.) spaced 17 m apart, each row bordered by a 2 m-wide permanent grass strip. During the study period, the cropping sequence was: durum wheat (sown Dec 2023, harvested 8 Jul 2024) → sorghum (sown 15 Jul 2024, mown 22 Nov, tilled 25 Nov 2024; irrigated three times in Jul–Aug 2024) → chickpea (sown 14 Mar 2025, harvested 10 Jul 2025).
 
 ------------------------------------------------------------------------
 
-## Research questions and hypotheses under development
+## Hypotheses
 
-H1 — Land-use type directly structures faunal activity in a non-stationary manner, with frequent reversals in sign and magnitude of land-use effects across seasons and management phases. 
-
-H2 — Land-use effects are predominantly indirect: while agricultural management generally amplifies thermal variability and dampens moisture fluctuations (via irrigation), shifting the dominant driver from resource supply toward abiotic forcing, these relationships exhibit significant temporal complexity. 
-
-H3 — Land-use intensification compresses taxonomic response. We expect that periods of high land-use constraints lead to a convergence of taxon-specific responses, thereby reducing the functional dispersion of responses across the community  
+| \# | Statement |
+|-----------------|------------------------------------------------------|
+| **H1** | Land-use effects on soil fauna are inherently non-stationary: their magnitude and direction shift through time in response to seasonal cycles and discrete management events. |
+| **H2** | The indirect pathways linking land use to faunal activity vary over time in intensity, as the dominant causal mechanism alternates between microclimatic forcing and resource-mediated (root) pathways. |
+| **H3** | Periods of strong land-use forcing reduce response diversity by driving convergence in taxon-specific responses, thereby transiently constraining the functional heterogeneity of the community. |
 
 ------------------------------------------------------------------------
 
 ## Causal model (piecewise SEM)
 
-![SEM diagram](images/image.png)
-
-The model is fitted independently on overlapping rolling time windows. All variables are z-score standardised prior to modelling, making path coefficients directly comparable across taxa and predictors.
-
-**Tier 1 — land use shapes microclimate**
+All variables are z-score standardised within each window prior to modelling; land-use type is retained on its binary scale (treed = 0, cultivated = 1). Each structural equation is fitted as a linear mixed-effects model with a nested random intercept (`orientation / depth`) and an AR(1) correlation structure. A residual covariance term (`microclimate_1 %~~% microclimate_2`) captures shared physical drivers not represented by the binary land-use contrast.
 
 ```         
-microclimate_1 ← β₁ · land_use
-microclimate_2 ← β₂ · land_use
+Tier 1 — land use shapes microclimate
+  microclimate_1 ← β₁ · land_use
+  microclimate_2 ← β₂ · land_use
+
+Tier 2 — microclimate × land use drives root growth
+  root ← β₃ · mc₁ + β₄ · mc₂ + β₅ · land_use
+
+Tier 3 — microclimate + root × land use drives fauna
+  fauna ← β₆ · mc₁ + β₇ · mc₂ + β₈ · root + β₉ · land_use
 ```
 
-**Tier 2 — microclimate × land use drives root growth**
+Indirect effects are computed as products of standardised path coefficients along each causal route. A total of seven pathway estimates are derived per window: five indirect routes, the total indirect (sum of the five), and the total effect (direct + total indirect).
+
+------------------------------------------------------------------------
+
+## Response diversity (H3)
+
+The rolling-window pSEM is fitted independently for six focal taxa: *Acari*, *Collembola*, *Enchytraeidae*, *Julida*, *Gastropoda*, and *Symphyla*. Per-window divergence in taxon-specific β-estimates is quantified using the index of Ross et al. (2023):
 
 ```         
-root ← β₃ · mc₁ + β₄ · mc₂ + β₅ · land_use
+D(w,k) = [max(β) − min(β) − |max(β) + min(β)|] / [max(β) − min(β)]
 ```
 
-**Tier 3 — microclimate + root × land use drives fauna**
-
-```         
-fauna ← β₆ · mc₁ + β₇ · mc₂ + β₈ · root + β₉ · land_use
-```
-
-Each equation includes a nested random intercept (`orientation / depth`) and an AR(1) correlation structure to account for temporal autocorrelation within scanner groups. A residual covariance term (`microclimate_1 %~~% microclimate_2`) captures shared physical drivers not represented by the binary land-use contrast.
+D = 1 when taxon responses span zero symmetrically (half positive, half negative); D = 0 when all taxa respond in the same direction. The relationship between D and the absolute community-level β is modelled with a GLS incorporating an AR(1) error structure.
 
 ------------------------------------------------------------------------
 
 ## Pipeline
 
-| Script | Role | Key output |
-|------------------------|------------------------|------------------------|
-| `1_database_edition.qmd` | Fauna, microclimate, root, and season assembly | `SEM_database.csv` |
-| `2_SEM_diagnostic.qmd` | Sensitivity analysis — window × completeness × transformation (120 combinations) | `model_parameters.txt` |
-| `3_SEM_modelisation.qmd` | Full rolling-window SEM across all taxa | `SEM_results_database.csv` |
-| `4_SEM_results_analysis.qmd` | Figures and tables for H1–H3 | TIFF figures |
+Scripts must be run in order. Script 2 is computationally intensive.
 
-Scripts must be run in order. Script 2 is computationally intensive (120 parameter combinations × 50 sampled windows each).
+| Script | Role | Key outputs |
+|---------------------|------------------|----------------------------------|
+| `1_database_edition.qmd` | Assembles fauna, microclimate, root, and season data into one analysis-ready table | `SEM_database.csv`, `fauna_vars.txt`, `microclimate_index.txt` |
+| `2_SEM_diagnostic.qmd` | Sensitivity analysis over 120 (window × completeness × transformation) combinations; selects the optimal modelling configuration | `model_parameters.txt` |
+| `3_SEM_modelisation.qmd` | Fits the full rolling-window pSEM for all taxa; computes indirect effects and the divergence index | `SEM_results_database.csv`, `indirect_effects.csv`, `H1_*.csv`, `DAG_*.csv` |
+| `4_SEM_results_analysis.qmd` | Produces all figures and tables for H1–H3; no modelling performed | `Fig1–Fig4` TIFF files |
 
 ``` r
 quarto::quarto_render("scripts/1_database_edition.qmd")
@@ -84,18 +83,48 @@ quarto::quarto_render("scripts/4_SEM_results_analysis.qmd")
 ```         
 project/
 ├── data/
-│   ├── fauna_data.csv
-│   ├── root_pixels_count.csv
-│   ├── Diams_AF1W_soil.csv
-│   └── Diams_AF1W_air.csv
-├── output/                          # generated, not versioned
+│   ├── fauna_data.csv                  # Raw invertebrate detections
+│   ├── root_pixels_count.csv           # Root pixel counts per image
+│   ├── Diams_AF1W_soil.csv             # Soil temperature and moisture
+│   └── Diams_AF1W_air.csv              # Air temperature and humidity
+├── output/                             # Generated by the pipeline — not versioned
 │   ├── SEM_database.csv
-│   ├── SEM_results_database.csv
+│   ├── microclimate_index.txt
+│   ├── fauna_vars.txt
 │   ├── model_parameters.txt
-│   └── *.tiff
+│   ├── SEM_results_database.csv
+│   ├── indirect_effects.csv
+│   ├── H1_adjusted_values.csv
+│   ├── H1_model_summary.csv
+│   ├── DAG_coefficients.csv
+│   ├── DAG_model_fit.csv
+│   └── Fig*.tiff
 └── scripts/
     ├── 1_database_edition.qmd
     ├── 2_SEM_diagnostic.qmd
     ├── 3_SEM_modelisation.qmd
     └── 4_SEM_results_analysis.qmd
 ```
+
+------------------------------------------------------------------------
+
+## Dependencies
+
+All analyses were performed in **R 4.5.2**. Core packages:
+
+| Package        | Role                                         |
+|----------------|----------------------------------------------|
+| `tidyverse`    | Data wrangling and visualisation             |
+| `nlme`         | Linear mixed-effects models                  |
+| `piecewiseSEM` | Piecewise structural equation modelling      |
+| `MuMIn`        | R² via variance partitioning                 |
+| `data.table`   | High-performance rolling joins for root data |
+| `ade4`         | Microclimate PCA                             |
+| `zoo`          | Rolling-window calculations                  |
+| `patchwork`    | Figure composition                           |
+
+------------------------------------------------------------------------
+
+The scanner-based imaging methodology is described in:
+
+> Belaud E., Jourdan C., Barry-Etienne D., Marsden C., Robin A., Taschen E., Hedde M. (2024). In situ soil imaging, a tool for monitoring the hourly to monthly temporal dynamics of soil biota. *Biology and Fertility of Soils* 60, 1055–1071. <https://doi.org/10.1007/s00374-024-01851-8>
